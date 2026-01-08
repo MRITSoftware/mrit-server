@@ -5,6 +5,7 @@ import android.util.Log
 import androidx.work.Constraints
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import com.mritsoftware.mritserver.worker.HeartbeatWorker
@@ -28,8 +29,14 @@ object HeartbeatService {
                 .setRequiredNetworkType(NetworkType.NOT_REQUIRED) // Não precisa de internet, apenas servidor local
                 .build()
             
+            // Executar heartbeat IMEDIATAMENTE ao sincronizar
+            val immediateHeartbeat = OneTimeWorkRequestBuilder<HeartbeatWorker>()
+                .setConstraints(constraints)
+                .addTag("${WORK_NAME}_immediate")
+                .build()
+            
+            // Agendar heartbeat periódico a cada 15 minutos
             // WorkManager requer mínimo de 15 minutos para PeriodicWorkRequest
-            // Usaremos 15 minutos (o mais próximo de 10 que é permitido)
             val heartbeatWork = PeriodicWorkRequestBuilder<HeartbeatWorker>(
                 15, // Intervalo mínimo permitido pelo WorkManager
                 TimeUnit.MINUTES
@@ -38,13 +45,17 @@ object HeartbeatService {
                 .addTag(WORK_NAME)
                 .build()
             
+            // Executar imediatamente
+            WorkManager.getInstance(context).enqueue(immediateHeartbeat)
+            
+            // Agendar periódico
             WorkManager.getInstance(context).enqueueUniquePeriodicWork(
                 WORK_NAME,
                 ExistingPeriodicWorkPolicy.KEEP, // Manter trabalho existente se já estiver rodando
                 heartbeatWork
             )
             
-            Log.d(TAG, "Heartbeat worker iniciado (a cada 15 minutos - mínimo permitido pelo WorkManager)")
+            Log.d(TAG, "Heartbeat worker iniciado: execução imediata + a cada 15 minutos")
         } catch (e: Exception) {
             Log.e(TAG, "Erro ao iniciar heartbeat worker: ${e.message}", e)
         }
