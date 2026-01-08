@@ -15,8 +15,8 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 /**
- * Worker que atualiza o campo updated_at no banco de dados a cada 10 minutos
- * para verificar se o servidor está respondendo.
+ * Worker que atualiza o campo servidor_online no banco de dados a cada 15 minutos
+ * para indicar que o servidor está online e funcionando.
  */
 class HeartbeatWorker(
     context: Context,

@@ -11,7 +11,7 @@ import com.mritsoftware.mritserver.worker.HeartbeatWorker
 import java.util.concurrent.TimeUnit
 
 /**
- * Gerencia o Worker de heartbeat que atualiza o updated_at no banco a cada 10 minutos
+ * Gerencia o Worker de heartbeat que atualiza o servidor_online no banco a cada 15 minutos
  */
 object HeartbeatService {
     
@@ -19,7 +19,8 @@ object HeartbeatService {
     private const val WORK_NAME = "heartbeat_work"
     
     /**
-     * Inicia o worker periódico de heartbeat (a cada 10 minutos)
+     * Inicia o worker periódico de heartbeat (a cada 15 minutos)
+     * Atualiza o campo servidor_online no banco para indicar que o servidor está online
      */
     fun startHeartbeat(context: Context) {
         try {

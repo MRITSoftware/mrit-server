@@ -5,6 +5,7 @@ import json
 import traceback
 import threading
 from typing import Optional, Dict, Any, List
+from datetime import datetime, timezone
 
 from flask import Flask, request, jsonify
 import tinytuya
@@ -340,8 +341,8 @@ def create_device_in_db(
 
 def update_device_heartbeat(tuya_device_id: str) -> bool:
     """
-    Atualiza apenas o campo updated_at de um device (heartbeat).
-    Faz um PATCH com o site_id atual para forçar atualização do timestamp.
+    Atualiza o campo servidor_online de um device (heartbeat/ping).
+    Atualiza com o timestamp atual para indicar que o servidor está online.
     """
     if not REQUESTS_AVAILABLE:
         log("[DB] requests não está disponível")
@@ -355,8 +356,8 @@ def update_device_heartbeat(tuya_device_id: str) -> bool:
         base_url = get_supabase_url()
         headers = get_supabase_headers()
         
-        # Primeiro, buscar o device para pegar o site_id atual
-        url_get = f"{base_url}/tuya_devices?tuya_device_id=eq.{tuya_device_id}&select=site_id"
+        # Verificar se o device existe no banco
+        url_get = f"{base_url}/tuya_devices?tuya_device_id=eq.{tuya_device_id}&select=id"
         response_get = requests.get(url_get, headers=headers, timeout=10)
         response_get.raise_for_status()
         
@@ -365,21 +366,20 @@ def update_device_heartbeat(tuya_device_id: str) -> bool:
             log(f"[HEARTBEAT] Device {tuya_device_id} não encontrado no banco")
             return False
         
-        # Pegar o site_id atual (ou usar SITE_NAME como fallback)
-        current_site_id = devices[0].get("site_id") or SITE_NAME
-        
-        # Fazer PATCH com o site_id atual para forçar atualização do updated_at
-        # O Supabase atualiza automaticamente o updated_at quando há um UPDATE
-        # Se não atualizar automaticamente, podemos usar uma função SQL ou trigger
-        update_data = {"site_id": current_site_id}
+        # Atualizar servidor_online com timestamp atual (formato ISO 8601 UTC)
+        # Usar timezone UTC para timestamp consistente
+        now_utc = datetime.now(timezone.utc)
+        timestamp_iso = now_utc.isoformat()
         
         # Atualizar usando Supabase REST API
         url = f"{base_url}/tuya_devices?tuya_device_id=eq.{tuya_device_id}"
         
-        log(f"[HEARTBEAT] Atualizando heartbeat para device {tuya_device_id}")
+        # Atualizar apenas o campo servidor_online com timestamp atual
+        update_data = {"servidor_online": timestamp_iso}
+        
+        log(f"[HEARTBEAT] Atualizando servidor_online para device {tuya_device_id} (timestamp: {timestamp_iso})")
         
         # Usar PATCH com Prefer: return=minimal para não retornar dados
-        # Adicionar Prefer: resolution=merge-duplicates para garantir que o update funcione
         headers_with_prefer = {**headers, "Prefer": "return=minimal,resolution=merge-duplicates"}
         response = requests.patch(url, json=update_data, headers=headers_with_prefer, timeout=10)
         
@@ -387,7 +387,7 @@ def update_device_heartbeat(tuya_device_id: str) -> bool:
         
         # Verificar se o update realmente aconteceu (status 204 ou 200)
         if response.status_code in (200, 204):
-            log(f"[HEARTBEAT] Heartbeat atualizado com sucesso para device {tuya_device_id} (status: {response.status_code})")
+            log(f"[HEARTBEAT] servidor_online atualizado com sucesso para device {tuya_device_id} (status: {response.status_code})")
             return True
         else:
             log(f"[HEARTBEAT] Resposta inesperada do Supabase: {response.status_code}")
@@ -892,7 +892,8 @@ def api_tuya_devices():
 @app.route("/tuya/heartbeat", methods=["POST"])
 def api_tuya_heartbeat():
     """
-    Atualiza o campo updated_at de um dispositivo (heartbeat).
+    Atualiza o campo servidor_online de um dispositivo (heartbeat/ping).
+    Atualiza com o timestamp atual para indicar que o servidor está online.
     
     Body:
     {
