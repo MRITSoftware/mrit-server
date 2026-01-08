@@ -537,7 +537,7 @@ class ConnectedActivity : AppCompatActivity() {
                         .setTitle("Status do Sistema")
                         .setMessage(
                             "Servidor: $serverStatusText\n\n" +
-                            "Cache JSON: $cacheStatusText"
+                            "Cache: $cacheStatusText"
                         )
                         .setPositiveButton("OK", null)
                         .setNeutralButton("Limpar Cache") { _, _ ->
