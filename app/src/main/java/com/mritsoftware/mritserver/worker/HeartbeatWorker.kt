@@ -30,15 +30,15 @@ class HeartbeatWorker(
         private const val KEY_SAVED_DEVICE_ID = "heartbeat_device_id" // Chave específica para heartbeat
     }
 
-    override suspend fun doWork(): androidx.work.Result = withContext(Dispatchers.IO) {
-        try {
+    override suspend fun doWork(): androidx.work.Result {
+        return try {
             Log.d(TAG, "Iniciando heartbeat...")
             
             // Verificar se o servidor está rodando
             val serverRunning = checkServerHealth()
             if (!serverRunning) {
                 Log.w(TAG, "Servidor não está respondendo, pulando heartbeat")
-                return@withContext Result.retry() // Tentar novamente mais tarde
+                return Result.retry() // Tentar novamente mais tarde
             }
             
             val sharedPreferences = applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -73,7 +73,7 @@ class HeartbeatWorker(
             
             if (deviceId.isNullOrEmpty()) {
                 Log.w(TAG, "Device ID não encontrado em nenhuma fonte, pulando heartbeat")
-                return@withContext Result.success() // Não é erro, apenas não há device configurado
+                return Result.success() // Não é erro, apenas não há device configurado
             }
             
             // Chamar endpoint de heartbeat
@@ -85,15 +85,15 @@ class HeartbeatWorker(
                     .putString(KEY_SAVED_DEVICE_ID, deviceId)
                     .apply()
                 Log.d(TAG, "Heartbeat enviado com sucesso para device $deviceId (salvo no app state)")
-                return@withContext Result.success()
+                Result.success()
             } else {
                 Log.w(TAG, "Falha ao enviar heartbeat, tentando novamente mais tarde")
                 // Não limpar o device_id salvo, para usar como fallback na próxima tentativa
-                return@withContext Result.retry()
+                Result.retry()
             }
         } catch (e: Exception) {
             Log.e(TAG, "Erro ao executar heartbeat: ${e.message}", e)
-            return@withContext Result.retry()
+            Result.retry()
         }
     }
     
