@@ -58,6 +58,9 @@ class MainActivity : AppCompatActivity() {
             startService(intent)
         }
         
+        // Iniciar heartbeat worker para ping a cada 15 minutos
+        com.mritsoftware.mritserver.service.HeartbeatService.startHeartbeat(this)
+        
         // Atualizar status após um pequeno delay para o servidor iniciar
         coroutineScope.launch {
             kotlinx.coroutines.delay(2000) // Dar mais tempo para Python inicializar

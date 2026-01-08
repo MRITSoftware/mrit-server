@@ -217,24 +217,54 @@ class ConnectedActivity : AppCompatActivity() {
                                 connection.disconnect()
                                 
                                 android.util.Log.d("ConnectedActivity", "Response: $response")
+                                
+                                // Validar se response não está vazio
+                                if (response.isBlank()) {
+                                    android.util.Log.w("ConnectedActivity", "Resposta vazia do servidor")
+                                    return@withContext null
+                                }
+                                
                                 val json = org.json.JSONObject(response)
                                 
-                                if (json.getBoolean("ok")) {
-                                    val devicesArray = json.getJSONArray("devices")
+                                // Usar optBoolean para evitar exceção se "ok" não existir
+                                if (json.optBoolean("ok", false)) {
+                                    // Usar optJSONArray para evitar exceção se "devices" não existir ou for null
+                                    val devicesArray = json.optJSONArray("devices")
+                                    
+                                    if (devicesArray == null) {
+                                        android.util.Log.w("ConnectedActivity", "Campo 'devices' não encontrado ou é null no JSON")
+                                        return@withContext null
+                                    }
+                                    
                                     android.util.Log.d("ConnectedActivity", "Encontrados ${devicesArray.length()} dispositivos no JSON")
                                     
                                     val devicesMap = mutableMapOf<String, Map<String, String>>()
                                     
                                     for (i in 0 until devicesArray.length()) {
-                                        val deviceObj = devicesArray.getJSONObject(i)
-                                        val deviceId = deviceObj.getString("id")
-                                        devicesMap[deviceId] = mapOf(
-                                            "id" to deviceId,
-                                            "ip" to deviceObj.optString("ip", ""),
-                                            "version" to deviceObj.optString("version", "")
-                                        )
+                                        try {
+                                            val deviceObj = devicesArray.optJSONObject(i)
+                                            if (deviceObj != null) {
+                                                val deviceId = deviceObj.optString("id", "")
+                                                if (deviceId.isNotEmpty()) {
+                                                    devicesMap[deviceId] = mapOf(
+                                                        "id" to deviceId,
+                                                        "ip" to deviceObj.optString("ip", ""),
+                                                        "version" to deviceObj.optString("version", "")
+                                                    )
+                                                }
+                                            }
+                                        } catch (e: Exception) {
+                                            android.util.Log.w("ConnectedActivity", "Erro ao processar dispositivo $i: ${e.message}")
+                                        }
                                     }
-                                    devicesMap
+                                    
+                                    // Só retornar se houver dispositivos válidos
+                                    if (devicesMap.isNotEmpty()) {
+                                        devicesMap
+                                    } else {
+                                        android.util.Log.w("ConnectedActivity", "Nenhum dispositivo válido encontrado no JSON")
+                                        null
+                                    }
                                 } else {
                                     android.util.Log.w("ConnectedActivity", "JSON retornou ok=false")
                                     null
@@ -290,6 +320,15 @@ class ConnectedActivity : AppCompatActivity() {
         
         if (scanResult != null && scanResult.isNotEmpty()) {
             android.util.Log.d("ConnectedActivity", "Processando ${scanResult.size} dispositivos")
+            
+            // Salvar dispositivos no cache
+            try {
+                val deviceCacheManager = com.mritsoftware.mritserver.service.DeviceCacheManager(this)
+                deviceCacheManager.saveDevicesFromMap(scanResult)
+                android.util.Log.d("ConnectedActivity", "Cache salvo com ${scanResult.size} dispositivos")
+            } catch (e: Exception) {
+                android.util.Log.e("ConnectedActivity", "Erro ao salvar cache: ${e.message}", e)
+            }
             
             for ((deviceId, deviceInfo) in scanResult) {
                 val ip = deviceInfo["ip"] ?: ""
@@ -369,6 +408,14 @@ class ConnectedActivity : AppCompatActivity() {
                 }
                 
                 if (syncResult) {
+                    // Salvar device_id para heartbeat
+                    sharedPreferences.edit()
+                        .putString("device_id", device.id)
+                        .apply()
+                    
+                    // Reiniciar heartbeat com novo device
+                    com.mritsoftware.mritserver.service.HeartbeatService.startHeartbeat(this@ConnectedActivity)
+                    
                     android.widget.Toast.makeText(this@ConnectedActivity, "Dispositivo trocado com sucesso", android.widget.Toast.LENGTH_SHORT).show()
                     dialog.dismiss()
                 } else {

@@ -342,7 +342,7 @@ def create_device_in_db(
 def update_device_heartbeat(tuya_device_id: str) -> bool:
     """
     Atualiza o campo servidor_online de um device (heartbeat/ping).
-    Atualiza com o timestamp atual para indicar que o servidor está online.
+    Primeiro tenta fazer ping na placa física, depois atualiza o banco.
     """
     if not REQUESTS_AVAILABLE:
         log("[DB] requests não está disponível")
@@ -356,8 +356,8 @@ def update_device_heartbeat(tuya_device_id: str) -> bool:
         base_url = get_supabase_url()
         headers = get_supabase_headers()
         
-        # Verificar se o device existe no banco
-        url_get = f"{base_url}/tuya_devices?tuya_device_id=eq.{tuya_device_id}&select=id"
+        # Buscar dados do dispositivo no banco (precisa de IP e local_key para ping)
+        url_get = f"{base_url}/tuya_devices?tuya_device_id=eq.{tuya_device_id}&select=id,lan_ip,local_key,protocol_version"
         response_get = requests.get(url_get, headers=headers, timeout=10)
         response_get.raise_for_status()
         
@@ -365,6 +365,41 @@ def update_device_heartbeat(tuya_device_id: str) -> bool:
         if not devices or len(devices) == 0:
             log(f"[HEARTBEAT] Device {tuya_device_id} não encontrado no banco")
             return False
+        
+        device_data = devices[0]
+        lan_ip = device_data.get("lan_ip")
+        local_key = device_data.get("local_key")
+        protocol_version = device_data.get("protocol_version")
+        
+        # Tentar fazer ping na placa física (consultar status sem alterar estado)
+        device_online = False
+        if lan_ip and local_key:
+            try:
+                # Usar versão do protocolo do banco ou padrão 3.3
+                version = float(protocol_version) if protocol_version else 3.3
+                
+                log(f"[HEARTBEAT] Fazendo ping na placa {tuya_device_id} @ {lan_ip} (versão {version})...")
+                
+                # Criar dispositivo Tuya e consultar status (ping sem alterar estado)
+                d = tinytuya.OutletDevice(tuya_device_id, lan_ip, local_key)
+                d.set_version(version)
+                
+                # Consultar status do dispositivo (não altera o estado, apenas verifica conexão)
+                status = d.status()
+                
+                if status:
+                    device_online = True
+                    log(f"[HEARTBEAT] Placa respondeu ao ping: {status}")
+                else:
+                    log(f"[HEARTBEAT] Placa não respondeu ao ping")
+                    
+            except Exception as e:
+                log(f"[HEARTBEAT] Erro ao fazer ping na placa {tuya_device_id}: {e}")
+                # Continuar mesmo se ping falhar - atualizar banco de qualquer forma
+                # para indicar que o servidor tentou se comunicar
+        else:
+            log(f"[HEARTBEAT] IP ou local_key não disponíveis para ping (IP: {lan_ip}, Key: {'presente' if local_key else 'ausente'})")
+            # Continuar mesmo sem ping - atualizar banco para indicar que servidor está online
         
         # Atualizar servidor_online com timestamp atual (formato ISO 8601 UTC)
         # Usar timezone UTC para timestamp consistente
@@ -379,7 +414,7 @@ def update_device_heartbeat(tuya_device_id: str) -> bool:
         # Atualizar apenas o campo servidor_online com timestamp atual
         update_data = {"servidor_online": timestamp_iso}
         
-        log(f"[HEARTBEAT] Atualizando servidor_online para device {tuya_device_id} (timestamp: {timestamp_iso})")
+        log(f"[HEARTBEAT] Atualizando servidor_online para device {tuya_device_id} (timestamp: {timestamp_iso}, placa online: {device_online})")
         
         # Usar PATCH com Prefer: return=minimal para não retornar dados
         headers_with_prefer = {**headers, "Prefer": "return=minimal,resolution=merge-duplicates"}
@@ -389,7 +424,7 @@ def update_device_heartbeat(tuya_device_id: str) -> bool:
         
         # Verificar se o update realmente aconteceu (status 204 ou 200)
         if response.status_code in (200, 204):
-            log(f"[HEARTBEAT] servidor_online atualizado com sucesso para device {tuya_device_id} (status: {response.status_code})")
+            log(f"[HEARTBEAT] servidor_online atualizado com sucesso para device {tuya_device_id} (status: {response.status_code}, placa online: {device_online})")
             return True
         else:
             log(f"[HEARTBEAT] Resposta inesperada do Supabase: {response.status_code}")
