@@ -370,6 +370,7 @@ def update_device_heartbeat(tuya_device_id: str) -> bool:
         
         # Fazer PATCH com o site_id atual para forçar atualização do updated_at
         # O Supabase atualiza automaticamente o updated_at quando há um UPDATE
+        # Se não atualizar automaticamente, podemos usar uma função SQL ou trigger
         update_data = {"site_id": current_site_id}
         
         # Atualizar usando Supabase REST API
@@ -378,13 +379,19 @@ def update_device_heartbeat(tuya_device_id: str) -> bool:
         log(f"[HEARTBEAT] Atualizando heartbeat para device {tuya_device_id}")
         
         # Usar PATCH com Prefer: return=minimal para não retornar dados
-        headers_with_prefer = {**headers, "Prefer": "return=minimal"}
+        # Adicionar Prefer: resolution=merge-duplicates para garantir que o update funcione
+        headers_with_prefer = {**headers, "Prefer": "return=minimal,resolution=merge-duplicates"}
         response = requests.patch(url, json=update_data, headers=headers_with_prefer, timeout=10)
         
         response.raise_for_status()
         
-        log(f"[HEARTBEAT] Heartbeat atualizado com sucesso para device {tuya_device_id}")
-        return True
+        # Verificar se o update realmente aconteceu (status 204 ou 200)
+        if response.status_code in (200, 204):
+            log(f"[HEARTBEAT] Heartbeat atualizado com sucesso para device {tuya_device_id} (status: {response.status_code})")
+            return True
+        else:
+            log(f"[HEARTBEAT] Resposta inesperada do Supabase: {response.status_code}")
+            return False
         
     except requests.exceptions.HTTPError as e:
         # Se o device não existir, não é erro crítico para heartbeat
