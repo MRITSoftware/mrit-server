@@ -84,11 +84,11 @@ class HeartbeatWorker(
                     .putString(KEY_SAVED_DEVICE_ID, deviceId)
                     .apply()
                 Log.d(TAG, "Heartbeat enviado com sucesso para device $deviceId (salvo no app state)")
-                Result.success()
+                return@withContext Result.success()
             } else {
                 Log.w(TAG, "Falha ao enviar heartbeat, tentando novamente mais tarde")
                 // Não limpar o device_id salvo, para usar como fallback na próxima tentativa
-                Result.retry()
+                return@withContext Result.retry()
             }
         } catch (e: Exception) {
             Log.e(TAG, "Erro ao executar heartbeat: ${e.message}", e)
