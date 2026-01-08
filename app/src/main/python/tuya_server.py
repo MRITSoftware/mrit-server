@@ -788,6 +788,7 @@ def api_tuya_command():
             return jsonify({"ok": False, "error": "tuya_device_id é obrigatório"}), 400
         
         # FALLBACK: Se local_key, lan_ip ou version não vierem no JSON, buscar do banco
+        used_fallback = False
         if not local_key or not lan_ip or lan_ip == "auto" or not version:
             log(f"[COMMAND] Dados incompletos no JSON - buscando do banco como fallback")
             log(f"[COMMAND] local_key presente: {bool(local_key)}, lan_ip: {lan_ip}, version: {version}")
@@ -796,6 +797,7 @@ def api_tuya_command():
             if tuya_device_id in db_devices:
                 db_device = db_devices[tuya_device_id]
                 log(f"[COMMAND] Device encontrado no banco, usando dados do cache")
+                used_fallback = True
                 
                 # Usar dados do banco apenas se não vieram no JSON
                 if not local_key:
@@ -836,7 +838,24 @@ def api_tuya_command():
             version=version
         )
         
-        return jsonify({"ok": True}), 200
+        # Sempre retornar dados do dispositivo para atualizar cache no cliente
+        # Isso garante que o cache seja atualizado mesmo quando não usa fallback
+        response_data = {
+            "ok": True,
+            "device": {
+                "id": tuya_device_id,
+                "ip": str(lan_ip) if lan_ip else "",
+                "version": str(version) if version else "",
+                "local_key": local_key or ""
+            }
+        }
+        
+        if used_fallback:
+            log(f"[COMMAND] Retornando dados do dispositivo (usado fallback do banco)")
+        else:
+            log(f"[COMMAND] Retornando dados do dispositivo (dados do JSON)")
+        
+        return jsonify(response_data), 200
     
     except Exception as e:
         err = str(e)

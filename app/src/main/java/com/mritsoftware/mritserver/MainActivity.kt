@@ -262,9 +262,49 @@ class MainActivity : AppCompatActivity() {
             writer.close()
             
             val responseCode = connection.responseCode
+            
+            // Ler resposta para verificar se contém dados do dispositivo
+            val response = if (responseCode == 200) {
+                try {
+                    val reader = java.io.BufferedReader(java.io.InputStreamReader(connection.inputStream))
+                    val responseText = reader.readText()
+                    reader.close()
+                    org.json.JSONObject(responseText)
+                } catch (e: Exception) {
+                    null
+                }
+            } else {
+                null
+            }
+            
             connection.disconnect()
             
-            responseCode == 200
+            val success = responseCode == 200
+            
+            // Se comando foi bem-sucedido e resposta contém dados do dispositivo, atualizar cache
+            if (success && response != null && response.optBoolean("ok", false) && response.has("device")) {
+                try {
+                    val deviceData = response.getJSONObject("device")
+                    val deviceIdFromResponse = deviceData.optString("id", deviceId)
+                    val ip = deviceData.optString("ip", lanIp)
+                    val version = deviceData.optString("version", "")
+                    val localKeyFromResponse = deviceData.optString("local_key", localKey)
+                    
+                    // Atualizar cache local
+                    val deviceCacheManager = com.mritsoftware.mritserver.service.DeviceCacheManager(this)
+                    deviceCacheManager.saveOrUpdateDevice(
+                        deviceId = deviceIdFromResponse,
+                        ip = ip.takeIf { it.isNotEmpty() },
+                        version = version.takeIf { it.isNotEmpty() },
+                        localKey = localKeyFromResponse.takeIf { it.isNotEmpty() }
+                    )
+                    Log.d("MainActivity", "Cache atualizado após comando bem-sucedido para device $deviceIdFromResponse")
+                } catch (e: Exception) {
+                    Log.w("MainActivity", "Erro ao atualizar cache após comando: ${e.message}")
+                }
+            }
+            
+            success
         } catch (e: Exception) {
             false
         }

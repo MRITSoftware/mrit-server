@@ -2,7 +2,9 @@ package com.mritsoftware.mritserver.service
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.util.Log
 import com.mritsoftware.mritserver.model.TuyaDevice
+import com.mritsoftware.mritserver.service.DeviceCacheManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -107,7 +109,32 @@ class FlaskService(private val context: Context) {
             
             connection.disconnect()
             
-            responseCode == 200 && response.optBoolean("ok", false)
+            val success = responseCode == 200 && response.optBoolean("ok", false)
+            
+            // Se comando foi bem-sucedido e resposta contém dados do dispositivo, atualizar cache
+            if (success && response.has("device")) {
+                try {
+                    val deviceData = response.getJSONObject("device")
+                    val deviceId = deviceData.optString("id", deviceId)
+                    val ip = deviceData.optString("ip", "")
+                    val version = deviceData.optString("version", "")
+                    val localKey = deviceData.optString("local_key", localKey)
+                    
+                    // Atualizar cache local
+                    val deviceCacheManager = DeviceCacheManager(context)
+                    deviceCacheManager.saveOrUpdateDevice(
+                        deviceId = deviceId,
+                        ip = ip.takeIf { it.isNotEmpty() },
+                        version = version.takeIf { it.isNotEmpty() },
+                        localKey = localKey.takeIf { it.isNotEmpty() }
+                    )
+                    android.util.Log.d("FlaskService", "Cache atualizado após comando bem-sucedido para device $deviceId")
+                } catch (e: Exception) {
+                    android.util.Log.w("FlaskService", "Erro ao atualizar cache após comando: ${e.message}")
+                }
+            }
+            
+            return success
         } catch (e: Exception) {
             e.printStackTrace()
             false
