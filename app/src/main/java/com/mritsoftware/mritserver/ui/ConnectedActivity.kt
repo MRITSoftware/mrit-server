@@ -441,6 +441,9 @@ class ConnectedActivity : AppCompatActivity() {
         } else {
             startService(intent)
         }
+        
+        // Iniciar heartbeat worker para ping a cada 15 minutos
+        com.mritsoftware.mritserver.service.HeartbeatService.startHeartbeat(this)
     }
     
     private fun checkServerStatus() {

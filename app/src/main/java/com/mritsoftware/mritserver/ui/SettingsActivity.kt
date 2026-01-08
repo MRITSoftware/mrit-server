@@ -9,12 +9,13 @@ import com.mritsoftware.mritserver.R
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import java.net.NetworkInterface
 
 class SettingsActivity : AppCompatActivity() {
     
-    private lateinit var siteNameInput: TextInputEditText
+    private lateinit var localIpText: TextInputEditText
+    private lateinit var siteNameText: TextInputEditText
     private lateinit var testButton: MaterialButton
-    private lateinit var saveButton: MaterialButton
     
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -23,6 +24,7 @@ class SettingsActivity : AppCompatActivity() {
         setupToolbar()
         setupViews()
         setupListeners()
+        loadInfo()
     }
     
     private fun setupToolbar() {
@@ -36,21 +38,48 @@ class SettingsActivity : AppCompatActivity() {
     }
     
     private fun setupViews() {
-        siteNameInput = findViewById(R.id.siteNameInput)
+        localIpText = findViewById(R.id.localIpText)
+        siteNameText = findViewById(R.id.siteNameText)
         testButton = findViewById(R.id.testButton)
-        saveButton = findViewById(R.id.saveButton)
+    }
+    
+    private fun loadInfo() {
+        // Carregar IP local
+        val localIp = getLocalIpAddress()
+        localIpText.setText(localIp ?: "Não disponível")
         
+        // Carregar nome da unidade
         val prefs = getSharedPreferences("TuyaGateway", MODE_PRIVATE)
-        siteNameInput.setText(prefs.getString("site_name", "ANDROID_DEVICE") ?: "ANDROID_DEVICE")
+        val siteName = prefs.getString("site_name", "ANDROID_DEVICE") ?: "ANDROID_DEVICE"
+        siteNameText.setText(siteName)
+    }
+    
+    private fun getLocalIpAddress(): String? {
+        return try {
+            val interfaces = NetworkInterface.getNetworkInterfaces()
+            while (interfaces.hasMoreElements()) {
+                val networkInterface = interfaces.nextElement()
+                val addresses = networkInterface.inetAddresses
+                while (addresses.hasMoreElements()) {
+                    val address = addresses.nextElement()
+                    if (!address.isLoopbackAddress && address is java.net.Inet4Address) {
+                        val ip = address.hostAddress
+                        if (ip != null && !ip.startsWith("169.254")) { // Ignorar link-local
+                            return ip
+                        }
+                    }
+                }
+            }
+            null
+        } catch (e: Exception) {
+            android.util.Log.e("SettingsActivity", "Erro ao obter IP local", e)
+            null
+        }
     }
     
     private fun setupListeners() {
         testButton.setOnClickListener {
             testConnection()
-        }
-        
-        saveButton.setOnClickListener {
-            saveSettings()
         }
     }
     
@@ -86,13 +115,13 @@ class SettingsActivity : AppCompatActivity() {
                         val site = response.optString("site", "N/A")
                         Toast.makeText(
                             this@SettingsActivity,
-                            "Servidor OK! Site: $site",
+                            "✅ Servidor OK! Site: $site",
                             Toast.LENGTH_LONG
                         ).show()
                     } else {
                         Toast.makeText(
                             this@SettingsActivity,
-                            "Servidor não está respondendo. Aguarde alguns segundos.",
+                            "❌ Servidor não está respondendo. Aguarde alguns segundos.",
                             Toast.LENGTH_LONG
                         ).show()
                     }
@@ -103,27 +132,12 @@ class SettingsActivity : AppCompatActivity() {
                     testButton.text = "Testar Conexão"
                     Toast.makeText(
                         this@SettingsActivity,
-                        "Erro: ${e.message}",
+                        "❌ Erro: ${e.message}",
                         Toast.LENGTH_LONG
                     ).show()
                 }
             }
         }
-    }
-    
-    private fun saveSettings() {
-        val siteName = siteNameInput.text?.toString()?.trim() ?: ""
-        
-        if (siteName.isBlank()) {
-            Toast.makeText(this, "Digite o nome do site", Toast.LENGTH_SHORT).show()
-            return
-        }
-        
-        val prefs = getSharedPreferences("TuyaGateway", MODE_PRIVATE)
-        prefs.edit().putString("site_name", siteName).apply()
-        
-        Toast.makeText(this, "Configurações salvas! Reinicie o app para aplicar.", Toast.LENGTH_LONG).show()
-        finish()
     }
 }
 

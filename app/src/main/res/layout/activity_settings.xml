@@ -25,33 +25,50 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Configurações"
+                android:text="Informações do Sistema"
                 android:textSize="20sp"
                 android:textStyle="bold"
                 android:textColor="@android:color/black"
-                android:layout_marginBottom="8dp" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Configure o nome deste site/tablet"
-                android:textSize="14sp"
-                android:textColor="@android:color/darker_gray"
                 android:layout_marginBottom="24dp" />
 
+            <!-- IP Local -->
             <com.google.android.material.textfield.TextInputLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:hint="Nome do Site/Tablet"
+                android:hint="IP Local"
                 android:layout_marginBottom="16dp"
-                style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox">
+                style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
+                app:boxBackgroundMode="outline"
+                app:enabled="false">
 
                 <com.google.android.material.textfield.TextInputEditText
-                    android:id="@+id/siteNameInput"
+                    android:id="@+id/localIpText"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:inputType="text"
-                    android:hint="Ex: GELAFIT_SP01" />
+                    android:inputType="none"
+                    android:focusable="false"
+                    android:clickable="false"
+                    android:text="Carregando..." />
+            </com.google.android.material.textfield.TextInputLayout>
+
+            <!-- Nome da Unidade -->
+            <com.google.android.material.textfield.TextInputLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="Nome da Unidade"
+                android:layout_marginBottom="24dp"
+                style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
+                app:boxBackgroundMode="outline"
+                app:enabled="false">
+
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/siteNameText"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:inputType="none"
+                    android:focusable="false"
+                    android:clickable="false"
+                    android:text="Carregando..." />
             </com.google.android.material.textfield.TextInputLayout>
             
             <com.google.android.material.button.MaterialButton
@@ -60,16 +77,7 @@
                 android:layout_height="wrap_content"
                 android:text="Testar Conexão"
                 android:textSize="18sp"
-                android:layout_marginBottom="8dp"
                 style="@style/Widget.Material3.Button.OutlinedButton" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/saveButton"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="Salvar"
-                android:textSize="18sp"
-                style="@style/Widget.Material3.Button" />
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
 
