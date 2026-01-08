@@ -338,6 +338,67 @@ def create_device_in_db(
         traceback.print_exc()
         return False
 
+def update_device_heartbeat(tuya_device_id: str) -> bool:
+    """
+    Atualiza apenas o campo updated_at de um device (heartbeat).
+    Faz um PATCH com o site_id atual para forçar atualização do timestamp.
+    """
+    if not REQUESTS_AVAILABLE:
+        log("[DB] requests não está disponível")
+        return False
+    
+    if not SUPABASE_CONFIG.get("url") or not SUPABASE_CONFIG.get("anon_key"):
+        log(f"[DB] Configuração do Supabase não encontrada. URL: {SUPABASE_CONFIG.get('url')}, Key: {'presente' if SUPABASE_CONFIG.get('anon_key') else 'ausente'}")
+        return False
+    
+    try:
+        base_url = get_supabase_url()
+        headers = get_supabase_headers()
+        
+        # Primeiro, buscar o device para pegar o site_id atual
+        url_get = f"{base_url}/tuya_devices?tuya_device_id=eq.{tuya_device_id}&select=site_id"
+        response_get = requests.get(url_get, headers=headers, timeout=10)
+        response_get.raise_for_status()
+        
+        devices = response_get.json()
+        if not devices or len(devices) == 0:
+            log(f"[HEARTBEAT] Device {tuya_device_id} não encontrado no banco")
+            return False
+        
+        # Pegar o site_id atual (ou usar SITE_NAME como fallback)
+        current_site_id = devices[0].get("site_id") or SITE_NAME
+        
+        # Fazer PATCH com o site_id atual para forçar atualização do updated_at
+        # O Supabase atualiza automaticamente o updated_at quando há um UPDATE
+        update_data = {"site_id": current_site_id}
+        
+        # Atualizar usando Supabase REST API
+        url = f"{base_url}/tuya_devices?tuya_device_id=eq.{tuya_device_id}"
+        
+        log(f"[HEARTBEAT] Atualizando heartbeat para device {tuya_device_id}")
+        
+        # Usar PATCH com Prefer: return=minimal para não retornar dados
+        headers_with_prefer = {**headers, "Prefer": "return=minimal"}
+        response = requests.patch(url, json=update_data, headers=headers_with_prefer, timeout=10)
+        
+        response.raise_for_status()
+        
+        log(f"[HEARTBEAT] Heartbeat atualizado com sucesso para device {tuya_device_id}")
+        return True
+        
+    except requests.exceptions.HTTPError as e:
+        # Se o device não existir, não é erro crítico para heartbeat
+        if e.response.status_code == 404 or (hasattr(e, 'response') and e.response.status_code == 406):
+            log(f"[HEARTBEAT] Device {tuya_device_id} não encontrado no banco")
+        else:
+            log(f"[HEARTBEAT] Erro HTTP ao atualizar heartbeat para device {tuya_device_id}: {e}")
+            log(f"[HEARTBEAT] Response: {e.response.text if hasattr(e, 'response') else 'N/A'}")
+        return False
+    except Exception as e:
+        log(f"[HEARTBEAT] Erro ao atualizar heartbeat para device {tuya_device_id}: {e}")
+        traceback.print_exc()
+        return False
+
 def update_device_in_db(
     tuya_device_id: str,
     site_id: Optional[str] = None,
@@ -762,6 +823,47 @@ def api_tuya_devices():
     except Exception as e:
         err = str(e)
         log(f"[ERRO] API /tuya/devices: {err}")
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": err}), 500
+
+@app.route("/tuya/heartbeat", methods=["POST"])
+def api_tuya_heartbeat():
+    """
+    Atualiza o campo updated_at de um dispositivo (heartbeat).
+    
+    Body:
+    {
+        "tuya_device_id": "bf1234567890abcdef"
+    }
+    """
+    try:
+        data: Dict[str, Any] = request.get_json(force=True, silent=True) or {}
+        
+        tuya_device_id = data.get("tuya_device_id")
+        
+        if not tuya_device_id:
+            return jsonify({
+                "ok": False,
+                "error": "tuya_device_id é obrigatório"
+            }), 400
+        
+        # Atualizar heartbeat no banco
+        success = update_device_heartbeat(tuya_device_id)
+        
+        if success:
+            return jsonify({
+                "ok": True,
+                "message": f"Heartbeat atualizado com sucesso para device {tuya_device_id}"
+            }), 200
+        else:
+            return jsonify({
+                "ok": False,
+                "error": f"Device {tuya_device_id} não encontrado ou erro ao atualizar"
+            }), 404
+    
+    except Exception as e:
+        err = str(e)
+        log(f"[ERRO] API /tuya/heartbeat: {err}")
         traceback.print_exc()
         return jsonify({"ok": False, "error": err}), 500
 
