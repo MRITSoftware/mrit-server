@@ -134,10 +134,10 @@ class FlaskService(private val context: Context) {
                 }
             }
             
-            return success
+            return@withContext success
         } catch (e: Exception) {
             e.printStackTrace()
-            false
+            return@withContext false
         }
     }
     
