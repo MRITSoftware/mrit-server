@@ -92,7 +92,7 @@ class HeartbeatWorker(
             }
         } catch (e: Exception) {
             Log.e(TAG, "Erro ao executar heartbeat: ${e.message}", e)
-            Result.retry()
+            return@withContext Result.retry()
         }
     }
     
