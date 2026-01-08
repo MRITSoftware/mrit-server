@@ -115,23 +115,28 @@ class FlaskService(private val context: Context) {
             if (success && response.has("device")) {
                 try {
                     val deviceData = response.getJSONObject("device")
-                    val deviceId = deviceData.optString("id", deviceId)
-                    val ip = deviceData.optString("ip", "")
-                    val version = deviceData.optString("version", "")
-                    val localKey = deviceData.optString("local_key", localKey)
+                    val deviceIdFromResponse = deviceData.optString("id", deviceId)
+                    val ip = deviceData.optString("ip", "").takeIf { it.isNotEmpty() }
+                    val version = deviceData.optString("version", "").takeIf { it.isNotEmpty() }
+                    val localKeyFromResponse = deviceData.optString("local_key", "").takeIf { it.isNotEmpty() } ?: localKey
                     
-                    // Atualizar cache local
+                    android.util.Log.d("FlaskService", "Dados recebidos do servidor - deviceId: $deviceIdFromResponse, ip: $ip, version: $version, localKey: ${if (localKeyFromResponse != null) "${localKeyFromResponse.take(8)}..." else "null"}")
+                    
+                    // Atualizar cache local - sempre atualizar mesmo se alguns campos estiverem vazios
                     val deviceCacheManager = DeviceCacheManager(context)
                     deviceCacheManager.saveOrUpdateDevice(
-                        deviceId = deviceId,
-                        ip = ip.takeIf { it.isNotEmpty() },
-                        version = version.takeIf { it.isNotEmpty() },
-                        localKey = localKey.takeIf { it.isNotEmpty() }
+                        deviceId = deviceIdFromResponse,
+                        ip = ip,
+                        version = version,
+                        localKey = localKeyFromResponse
                     )
-                    android.util.Log.d("FlaskService", "Cache atualizado após comando bem-sucedido para device $deviceId")
+                    android.util.Log.d("FlaskService", "Cache atualizado após comando bem-sucedido para device $deviceIdFromResponse")
                 } catch (e: Exception) {
-                    android.util.Log.w("FlaskService", "Erro ao atualizar cache após comando: ${e.message}")
+                    android.util.Log.e("FlaskService", "Erro ao atualizar cache após comando: ${e.message}", e)
+                    e.printStackTrace()
                 }
+            } else {
+                android.util.Log.w("FlaskService", "Resposta não contém dados do dispositivo ou comando falhou. success: $success, hasDevice: ${response.has("device")}")
             }
             
             return@withContext success

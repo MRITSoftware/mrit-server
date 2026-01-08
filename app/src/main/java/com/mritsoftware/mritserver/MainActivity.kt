@@ -286,22 +286,27 @@ class MainActivity : AppCompatActivity() {
                 try {
                     val deviceData = response.getJSONObject("device")
                     val deviceIdFromResponse = deviceData.optString("id", deviceId)
-                    val ip = deviceData.optString("ip", lanIp)
-                    val version = deviceData.optString("version", "")
-                    val localKeyFromResponse = deviceData.optString("local_key", localKey)
+                    val ip = deviceData.optString("ip", lanIp).takeIf { it.isNotEmpty() }
+                    val version = deviceData.optString("version", "").takeIf { it.isNotEmpty() }
+                    val localKeyFromResponse = deviceData.optString("local_key", "").takeIf { it.isNotEmpty() } ?: localKey
                     
-                    // Atualizar cache local
+                    Log.d("MainActivity", "Dados recebidos do servidor - deviceId: $deviceIdFromResponse, ip: $ip, version: $version, localKey: ${if (localKeyFromResponse != null) "${localKeyFromResponse.take(8)}..." else "null"}")
+                    
+                    // Atualizar cache local - sempre atualizar mesmo se alguns campos estiverem vazios
                     val deviceCacheManager = com.mritsoftware.mritserver.service.DeviceCacheManager(this)
                     deviceCacheManager.saveOrUpdateDevice(
                         deviceId = deviceIdFromResponse,
-                        ip = ip.takeIf { it.isNotEmpty() },
-                        version = version.takeIf { it.isNotEmpty() },
-                        localKey = localKeyFromResponse.takeIf { it.isNotEmpty() }
+                        ip = ip,
+                        version = version,
+                        localKey = localKeyFromResponse
                     )
                     Log.d("MainActivity", "Cache atualizado após comando bem-sucedido para device $deviceIdFromResponse")
                 } catch (e: Exception) {
-                    Log.w("MainActivity", "Erro ao atualizar cache após comando: ${e.message}")
+                    Log.e("MainActivity", "Erro ao atualizar cache após comando: ${e.message}", e)
+                    e.printStackTrace()
                 }
+            } else {
+                Log.w("MainActivity", "Resposta não contém dados do dispositivo ou comando falhou. success: $success, response: $response")
             }
             
             success

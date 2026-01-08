@@ -368,8 +368,10 @@ def update_device_heartbeat(tuya_device_id: str) -> bool:
         
         # Atualizar servidor_online com timestamp atual (formato ISO 8601 UTC)
         # Usar timezone UTC para timestamp consistente
+        # Formato: YYYY-MM-DDTHH:MM:SS.ffffff+00:00 (ISO 8601 com timezone)
         now_utc = datetime.now(timezone.utc)
-        timestamp_iso = now_utc.isoformat()
+        # Formatar explicitamente para garantir compatibilidade com timestampz do PostgreSQL
+        timestamp_iso = now_utc.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "+00:00"
         
         # Atualizar usando Supabase REST API
         url = f"{base_url}/tuya_devices?tuya_device_id=eq.{tuya_device_id}"
