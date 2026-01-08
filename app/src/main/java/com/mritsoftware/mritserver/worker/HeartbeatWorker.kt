@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
 import androidx.work.CoroutineWorker
+import androidx.work.Result
 import androidx.work.WorkerParameters
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -29,7 +30,7 @@ class HeartbeatWorker(
         private const val KEY_SAVED_DEVICE_ID = "heartbeat_device_id" // Chave específica para heartbeat
     }
 
-    override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
+    override suspend fun doWork(): androidx.work.Result = withContext(Dispatchers.IO) {
         try {
             Log.d(TAG, "Iniciando heartbeat...")
             
