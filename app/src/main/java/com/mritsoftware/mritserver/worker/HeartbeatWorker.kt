@@ -168,7 +168,7 @@ class HeartbeatWorker(
             }
         } catch (e: Exception) {
             Log.e(TAG, "Erro ao enviar heartbeat: ${e.message}", e)
-            false
+            return@withContext false
         }
     }
 }
