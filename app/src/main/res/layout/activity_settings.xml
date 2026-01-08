@@ -38,8 +38,7 @@
                 android:hint="IP Local"
                 android:layout_marginBottom="16dp"
                 style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
-                app:boxBackgroundMode="outline"
-                app:enabled="false">
+                app:boxBackgroundMode="outline">
 
                 <com.google.android.material.textfield.TextInputEditText
                     android:id="@+id/localIpText"
@@ -48,6 +47,7 @@
                     android:inputType="none"
                     android:focusable="false"
                     android:clickable="false"
+                    android:enabled="false"
                     android:text="Carregando..." />
             </com.google.android.material.textfield.TextInputLayout>
 
@@ -58,8 +58,7 @@
                 android:hint="Nome da Unidade"
                 android:layout_marginBottom="24dp"
                 style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
-                app:boxBackgroundMode="outline"
-                app:enabled="false">
+                app:boxBackgroundMode="outline">
 
                 <com.google.android.material.textfield.TextInputEditText
                     android:id="@+id/siteNameText"
@@ -68,6 +67,7 @@
                     android:inputType="none"
                     android:focusable="false"
                     android:clickable="false"
+                    android:enabled="false"
                     android:text="Carregando..." />
             </com.google.android.material.textfield.TextInputLayout>
             
