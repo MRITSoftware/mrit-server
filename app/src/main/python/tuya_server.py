@@ -773,7 +773,7 @@ def api_config_supabase():
 @app.route("/tuya/command", methods=["POST"])
 def api_tuya_command():
     try:
-        data: Dict[str, Any] = request.get_json(force=True, silent=False) or {}
+        data: Dict[str, Any] = request.get_json(force=True, silent=True) or {}
         
         action = data.get("action")
         tuya_device_id = data.get("tuya_device_id")
@@ -783,6 +783,43 @@ def api_tuya_command():
         
         if action not in ("on", "off"):
             return jsonify({"ok": False, "error": "action deve ser 'on' ou 'off'"}), 400
+        
+        if not tuya_device_id:
+            return jsonify({"ok": False, "error": "tuya_device_id é obrigatório"}), 400
+        
+        # FALLBACK: Se local_key, lan_ip ou version não vierem no JSON, buscar do banco
+        if not local_key or not lan_ip or lan_ip == "auto" or not version:
+            log(f"[COMMAND] Dados incompletos no JSON - buscando do banco como fallback")
+            log(f"[COMMAND] local_key presente: {bool(local_key)}, lan_ip: {lan_ip}, version: {version}")
+            
+            db_devices = get_devices_from_db([tuya_device_id])
+            if tuya_device_id in db_devices:
+                db_device = db_devices[tuya_device_id]
+                log(f"[COMMAND] Device encontrado no banco, usando dados do cache")
+                
+                # Usar dados do banco apenas se não vieram no JSON
+                if not local_key:
+                    local_key = db_device.get('local_key')
+                    log(f"[COMMAND] local_key obtida do banco: {local_key[:8] if local_key else 'None'}...")
+                
+                if not lan_ip or lan_ip == "auto":
+                    lan_ip = db_device.get('lan_ip')
+                    log(f"[COMMAND] lan_ip obtido do banco: {lan_ip}")
+                
+                if not version:
+                    protocol_version = db_device.get('protocol_version')
+                    if protocol_version:
+                        try:
+                            version = float(protocol_version)
+                            log(f"[COMMAND] version obtida do banco: {version}")
+                        except (ValueError, TypeError):
+                            version = None
+            else:
+                log(f"[COMMAND] Device {tuya_device_id} não encontrado no banco")
+        
+        # Validar se temos os dados mínimos necessários
+        if not local_key:
+            return jsonify({"ok": False, "error": "local_key é obrigatório e não foi encontrado no banco"}), 400
         
         # Converte version para float se vier como string
         if version is not None and version != "":

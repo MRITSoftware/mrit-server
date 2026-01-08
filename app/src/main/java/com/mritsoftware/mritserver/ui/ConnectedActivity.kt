@@ -29,7 +29,9 @@ class ConnectedActivity : AppCompatActivity() {
     
     private lateinit var sharedPreferences: SharedPreferences
     private lateinit var statusCircle: View
+    private lateinit var configButton: com.google.android.material.button.MaterialButton
     private lateinit var changeDeviceButton: com.google.android.material.button.MaterialButton
+    private lateinit var healthButton: com.google.android.material.button.MaterialButton
     private val coroutineScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -53,11 +55,24 @@ class ConnectedActivity : AppCompatActivity() {
     
     private fun setupViews() {
         statusCircle = findViewById(R.id.statusCircle)
+        configButton = findViewById(R.id.configButton)
         changeDeviceButton = findViewById(R.id.changeDeviceButton)
+        healthButton = findViewById(R.id.healthButton)
         
-        // Configurar botão de trocar dispositivo
+        // Configurar botão CONFIG (abre configurações)
+        configButton.setOnClickListener {
+            val intent = Intent(this, com.mritsoftware.mritserver.ui.SettingsActivity::class.java)
+            startActivity(intent)
+        }
+        
+        // Configurar botão de trocar dispositivo (reconfigurar servidor)
         changeDeviceButton.setOnClickListener {
             showChangeDeviceDialog()
+        }
+        
+        // Configurar botão Saúde (status do servidor e cache)
+        healthButton.setOnClickListener {
+            showHealthDialog()
         }
         
         // Aplicar insets para status bar
@@ -485,6 +500,67 @@ class ConnectedActivity : AppCompatActivity() {
         intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
         startActivity(intent)
         finish()
+    }
+    
+    private fun showHealthDialog() {
+        coroutineScope.launch {
+            try {
+                // Verificar status do servidor
+                val serverStatus = withContext(Dispatchers.IO) {
+                    checkServerHealth()
+                }
+                
+                // Verificar cache
+                val deviceCacheManager = com.mritsoftware.mritserver.service.DeviceCacheManager(this@ConnectedActivity)
+                val hasCache = deviceCacheManager.hasCache()
+                val cachedDevices = deviceCacheManager.loadDevices()
+                val lastUpdate = deviceCacheManager.getLastUpdateTimestamp()
+                
+                // Formatar informações
+                val serverStatusText = if (serverStatus) "✅ Online" else "❌ Offline"
+                val cacheStatusText = if (hasCache) {
+                    val deviceCount = cachedDevices?.size ?: 0
+                    val lastUpdateDate = if (lastUpdate > 0) {
+                        val date = java.util.Date(lastUpdate)
+                        java.text.SimpleDateFormat("dd/MM/yyyy HH:mm:ss", java.util.Locale.getDefault()).format(date)
+                    } else {
+                        "Nunca"
+                    }
+                    "✅ OK ($deviceCount dispositivo(s), atualizado: $lastUpdateDate)"
+                } else {
+                    "❌ Vazio"
+                }
+                
+                // Mostrar dialog
+                runOnUiThread {
+                    androidx.appcompat.app.AlertDialog.Builder(this@ConnectedActivity)
+                        .setTitle("Status do Sistema")
+                        .setMessage(
+                            "Servidor: $serverStatusText\n\n" +
+                            "Cache JSON: $cacheStatusText"
+                        )
+                        .setPositiveButton("OK", null)
+                        .setNeutralButton("Limpar Cache") { _, _ ->
+                            deviceCacheManager.clearCache()
+                            android.widget.Toast.makeText(
+                                this@ConnectedActivity,
+                                "Cache limpo com sucesso",
+                                android.widget.Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                        .show()
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("ConnectedActivity", "Erro ao verificar saúde do sistema", e)
+                runOnUiThread {
+                    android.widget.Toast.makeText(
+                        this@ConnectedActivity,
+                        "Erro ao verificar status: ${e.message}",
+                        android.widget.Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }
     }
     
     override fun onBackPressed() {
