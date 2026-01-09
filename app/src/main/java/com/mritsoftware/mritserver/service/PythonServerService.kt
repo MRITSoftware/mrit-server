@@ -357,14 +357,12 @@ class PythonServerService : Service() {
                 networkCallback = object : ConnectivityManager.NetworkCallback() {
                     override fun onAvailable(network: Network) {
                         Log.d(TAG, "Rede WiFi disponível - Mantendo conexão ativa")
-                        // Manter conexão ativa
-                        connectivityManager.bindProcessToNetwork(network)
+                        // NetworkCallback já mantém a conexão ativa automaticamente
                     }
                     
                     override fun onLost(network: Network) {
                         Log.w(TAG, "Rede WiFi perdida - Tentando reconectar...")
-                        // Tentar reconectar
-                        connectivityManager.unbindProcessToNetwork()
+                        // NetworkCallback detectará automaticamente quando nova rede estiver disponível
                     }
                     
                     override fun onCapabilitiesChanged(
@@ -411,7 +409,6 @@ class PythonServerService : Service() {
                 networkCallback?.let {
                     val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
                     connectivityManager.unregisterNetworkCallback(it)
-                    connectivityManager.unbindProcessToNetwork()
                     Log.d(TAG, "NetworkCallback removido")
                 }
                 networkCallback = null
