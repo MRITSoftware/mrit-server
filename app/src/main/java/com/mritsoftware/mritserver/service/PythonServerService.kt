@@ -12,6 +12,7 @@ import com.chaquo.python.android.AndroidPlatform
 import com.mritsoftware.mritserver.MainActivity
 import com.mritsoftware.mritserver.R
 import com.mritsoftware.mritserver.ui.ConnectedActivity
+import com.mritsoftware.mritserver.service.HeartbeatService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -29,6 +30,7 @@ class PythonServerService : Service() {
     private var healthCheckJob: Job? = null
     private val HEALTH_CHECK_INTERVAL = 60000L // 1 minuto
     private var localIpMonitor: LocalIpMonitorService? = null
+    private var wasServerOnline = false // Rastrear estado anterior do servidor
     
     override fun onCreate() {
         super.onCreate()
@@ -55,11 +57,23 @@ class PythonServerService : Service() {
         startPythonServer()
         startHealthCheck()
         startLocalIpMonitoring()
+        
+        // Iniciar heartbeat quando serviço inicia (garantir que funcione em background)
+        try {
+            Log.d(TAG, "Iniciando heartbeat do serviço...")
+            HeartbeatService.startHeartbeat(this)
+        } catch (e: Exception) {
+            Log.e(TAG, "Erro ao iniciar heartbeat no serviço: ${e.message}", e)
+        }
+        
         return START_STICKY // Serviço será reiniciado se for morto
     }
     
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            // IMPORTANCE_LOW pode fazer o sistema matar o serviço
+            // IMPORTANCE_LOW = sem som, sem vibração, mas visível
+            // IMPORTANCE_MIN = pode ser ocultado pelo sistema
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "Servidor",
@@ -67,6 +81,8 @@ class PythonServerService : Service() {
             ).apply {
                 description = "Servidor rodando em background"
                 setShowBadge(false)
+                // Não permitir que o sistema oculte a notificação
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
             }
             
             val notificationManager = getSystemService(NotificationManager::class.java)
@@ -97,8 +113,10 @@ class PythonServerService : Service() {
             .setContentText("Servidor rodando na porta 8000")
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentIntent(pendingIntent)
-            .setOngoing(true)
+            .setOngoing(true) // Não pode ser removida pelo usuário
             .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .build()
     }
     
@@ -143,17 +161,44 @@ class PythonServerService : Service() {
         // Cancelar health check anterior se existir
         healthCheckJob?.cancel()
         
+        // Inicializar estado como false para detectar primeira vez que servidor fica online
+        wasServerOnline = false
+        
         healthCheckJob = coroutineScope.launch {
             while (isActive) {
                 delay(HEALTH_CHECK_INTERVAL)
                 
-                if (!checkServerHealth()) {
+                val isServerOnline = checkServerHealth()
+                
+                if (!isServerOnline) {
                     Log.w(TAG, "Servidor não está respondendo - Reiniciando...")
                     startPythonServer()
+                    wasServerOnline = false
+                } else {
+                    // Servidor está online
+                    // Se estava offline antes e agora está online, disparar heartbeat imediato
+                    if (!wasServerOnline) {
+                        Log.d(TAG, "Servidor voltou a ficar online - Disparando heartbeat imediato...")
+                        triggerImmediateHeartbeat()
+                    }
+                    wasServerOnline = true
                 }
             }
         }
         Log.d(TAG, "Health check iniciado (intervalo: ${HEALTH_CHECK_INTERVAL}ms)")
+    }
+    
+    private fun triggerImmediateHeartbeat() {
+        try {
+            // Aguardar um pouco para garantir que o servidor está totalmente pronto
+            coroutineScope.launch {
+                delay(2000) // 2 segundos
+                Log.d(TAG, "Disparando heartbeat imediato após servidor voltar online...")
+                HeartbeatService.startHeartbeat(this@PythonServerService)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Erro ao disparar heartbeat imediato: ${e.message}", e)
+        }
     }
     
     private fun checkServerHealth(): Boolean {

@@ -27,6 +27,10 @@ object HeartbeatService {
         try {
             val constraints = Constraints.Builder()
                 .setRequiredNetworkType(NetworkType.NOT_REQUIRED) // Não precisa de internet, apenas servidor local
+                .setRequiresBatteryNotLow(false) // Não precisa bateria alta
+                .setRequiresCharging(false) // Não precisa estar carregando
+                .setRequiresDeviceIdle(false) // Pode executar mesmo com tela ligada
+                .setRequiresStorageNotLow(false) // Não precisa muito espaço
                 .build()
             
             // Executar heartbeat IMEDIATAMENTE ao sincronizar
@@ -51,11 +55,23 @@ object HeartbeatService {
             // Agendar periódico
             WorkManager.getInstance(context).enqueueUniquePeriodicWork(
                 WORK_NAME,
-                ExistingPeriodicWorkPolicy.KEEP, // Manter trabalho existente se já estiver rodando
+                ExistingPeriodicWorkPolicy.REPLACE, // Substituir se já existir para garantir que está ativo
                 heartbeatWork
             )
             
             Log.d(TAG, "Heartbeat worker iniciado: execução imediata + a cada 15 minutos")
+            Log.d(TAG, "WorkManager configurado para executar mesmo com app fechado")
+            
+            // Verificar se WorkManager está funcionando (debug)
+            try {
+                val workInfos = WorkManager.getInstance(context).getWorkInfosForUniqueWork(WORK_NAME).get()
+                if (workInfos.isNotEmpty()) {
+                    val workInfo = workInfos[0]
+                    Log.d(TAG, "Status do WorkManager: ${workInfo.state}, tentativas: ${workInfo.runAttemptCount}")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Não foi possível verificar status do WorkManager: ${e.message}")
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Erro ao iniciar heartbeat worker: ${e.message}", e)
         }

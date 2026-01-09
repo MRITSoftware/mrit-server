@@ -31,6 +31,8 @@ class HeartbeatWorker(
 
     override suspend fun doWork(): androidx.work.ListenableWorker.Result {
         return try {
+            Log.d(TAG, "=== HEARTBEAT WORKER EXECUTANDO ===")
+            Log.d(TAG, "App pode estar fechado - WorkManager executando em background")
             Log.d(TAG, "Iniciando heartbeat...")
             
             // Verificar se o servidor está rodando

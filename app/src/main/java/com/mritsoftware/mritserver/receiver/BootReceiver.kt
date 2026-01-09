@@ -49,6 +49,16 @@ class BootReceiver : BroadcastReceiver() {
                     context.startService(serviceIntent)
                     Log.d(TAG, "startService chamado com sucesso")
                 }
+                
+                // Aguardar um pouco e iniciar heartbeat
+                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                    try {
+                        Log.d(TAG, "Iniciando heartbeat após boot...")
+                        com.mritsoftware.mritserver.service.HeartbeatService.startHeartbeat(context)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Erro ao iniciar heartbeat após boot: ${e.message}", e)
+                    }
+                }, 10000) // Aguardar 10 segundos para servidor iniciar
             } catch (e: Exception) {
                 Log.e(TAG, "ERRO ao iniciar serviço: ${e.message}", e)
                 e.printStackTrace()

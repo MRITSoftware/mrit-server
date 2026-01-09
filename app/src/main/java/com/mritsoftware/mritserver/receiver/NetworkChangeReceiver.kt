@@ -8,6 +8,7 @@ import android.net.NetworkCapabilities
 import android.os.Build
 import android.util.Log
 import com.mritsoftware.mritserver.service.PythonServerService
+import com.mritsoftware.mritserver.service.HeartbeatService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -21,7 +22,7 @@ class NetworkChangeReceiver : BroadcastReceiver() {
         val action = intent.action
         if (action == ConnectivityManager.CONNECTIVITY_ACTION || 
             action == "android.net.conn.CONNECTIVITY_CHANGE") {
-            Log.d(TAG, "Mudança de conectividade detectada")
+            Log.d(TAG, "Mudan?a de conectividade detectada")
             
             val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
             val isConnected = connectivityManager?.let { cm ->
@@ -54,7 +55,7 @@ class NetworkChangeReceiver : BroadcastReceiver() {
     private fun checkAndRestartServer(context: Context) {
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                // Verificar se o servidor está respondendo
+                // Verificar se o servidor est? respondendo
                 val url = java.net.URL("http://127.0.0.1:8000/health")
                 val connection = url.openConnection() as java.net.HttpURLConnection
                 connection.requestMethod = "GET"
@@ -65,13 +66,16 @@ class NetworkChangeReceiver : BroadcastReceiver() {
                 connection.disconnect()
                 
                 if (responseCode == 200) {
-                    Log.d(TAG, "Servidor está respondendo corretamente")
+                    Log.d(TAG, "Servidor est? respondendo corretamente - Disparando heartbeat imediato...")
+                    // Servidor voltou a ficar online, disparar heartbeat imediato
+                    delay(2000) // Aguardar servidor estabilizar
+                    HeartbeatService.startHeartbeat(context)
                 } else {
-                    Log.w(TAG, "Servidor não está respondendo (código: $responseCode) - Reiniciando...")
+                    Log.w(TAG, "Servidor n?o est? respondendo (c?digo: $responseCode) - Reiniciando...")
                     restartServer(context)
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "Servidor não está respondendo - Reiniciando...", e)
+                Log.w(TAG, "Servidor n?o est? respondendo - Reiniciando...", e)
                 restartServer(context)
             }
         }
@@ -81,7 +85,7 @@ class NetworkChangeReceiver : BroadcastReceiver() {
         try {
             Log.d(TAG, "Reiniciando PythonServerService...")
             
-            // Parar o serviço atual
+            // Parar o servi?o atual
             val stopIntent = Intent(context, PythonServerService::class.java).apply {
                 action = "STOP_SERVICE"
             }
@@ -91,7 +95,7 @@ class NetworkChangeReceiver : BroadcastReceiver() {
             CoroutineScope(Dispatchers.IO).launch {
                 delay(2000)
                 
-                // Reiniciar o serviço
+                // Reiniciar o servi?o
                 val startIntent = Intent(context, PythonServerService::class.java).apply {
                     setPackage(context.packageName)
                 }
@@ -99,13 +103,13 @@ class NetworkChangeReceiver : BroadcastReceiver() {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     try {
                         context.startForegroundService(startIntent)
-                        Log.d(TAG, "Serviço reiniciado com sucesso")
+                        Log.d(TAG, "Servi?o reiniciado com sucesso")
                     } catch (e: Exception) {
-                        Log.e(TAG, "Erro ao reiniciar serviço", e)
+                        Log.e(TAG, "Erro ao reiniciar servi?o", e)
                     }
                 } else {
                     context.startService(startIntent)
-                    Log.d(TAG, "Serviço reiniciado com sucesso")
+                    Log.d(TAG, "Servi?o reiniciado com sucesso")
                 }
             }
         } catch (e: Exception) {
