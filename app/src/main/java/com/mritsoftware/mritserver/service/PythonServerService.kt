@@ -14,6 +14,7 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.NotificationCompat
 import com.chaquo.python.Python
 import com.chaquo.python.android.AndroidPlatform
@@ -38,11 +39,13 @@ class PythonServerService : Service() {
     private var healthCheckJob: Job? = null
     private val HEALTH_CHECK_INTERVAL = 60000L // 1 minuto
     private val HEARTBEAT_MONITOR_INTERVAL = 20 * 60 * 1000L // 20 minutos - verificar se heartbeat executou
+    private val HEARTBEAT_DIRECT_INTERVAL = 15 * 60 * 1000L // 15 minutos - heartbeat direto no serviço
     private var localIpMonitor: LocalIpMonitorService? = null
     private var wasServerOnline = false // Rastrear estado anterior do servidor
     private var wakeLock: PowerManager.WakeLock? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private var heartbeatMonitorJob: Job? = null
+    private var heartbeatDirectJob: Job? = null // Heartbeat direto no serviço como fallback
     
     override fun onCreate() {
         super.onCreate()
@@ -80,6 +83,7 @@ class PythonServerService : Service() {
         startHealthCheck()
         startLocalIpMonitoring()
         startHeartbeatMonitoring()
+        startDirectHeartbeat() // Heartbeat direto no serviço como fallback
         
         // Iniciar heartbeat quando serviço inicia (garantir que funcione em background)
         try {
@@ -419,7 +423,7 @@ class PythonServerService : Service() {
     }
     
     /**
-     * Verifica se otimizações de bateria estão ativas e loga aviso
+     * Verifica se otimizações de bateria estão ativas e solicita desativação
      */
     private fun checkBatteryOptimizations() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -431,13 +435,65 @@ class PythonServerService : Service() {
                 if (!isIgnoringBatteryOptimizations) {
                     Log.w(TAG, "⚠️ Otimizações de bateria NÃO estão desativadas")
                     Log.w(TAG, "⚠️ O Android pode matar o processo em background")
-                    Log.w(TAG, "⚠️ Para melhor funcionamento, desative otimizações de bateria nas configurações")
+                    
+                    // Verificar se já solicitamos antes (evitar spam)
+                    val prefs = getSharedPreferences("TuyaGateway", Context.MODE_PRIVATE)
+                    val lastRequestTime = prefs.getLong("battery_opt_request_time", 0L)
+                    val currentTime = System.currentTimeMillis()
+                    val hoursSinceLastRequest = (currentTime - lastRequestTime) / (1000 * 60 * 60)
+                    
+                    // Solicitar apenas uma vez por dia
+                    if (hoursSinceLastRequest >= 24) {
+                        Log.d(TAG, "Solicitando desativação de otimizações de bateria...")
+                        requestBatteryOptimizationDisable()
+                        prefs.edit().putLong("battery_opt_request_time", currentTime).apply()
+                    } else {
+                        Log.d(TAG, "Já solicitamos desativação há ${hoursSinceLastRequest.toInt()} horas, aguardando...")
+                    }
                 } else {
                     Log.d(TAG, "✅ Otimizações de bateria estão desativadas")
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Erro ao verificar otimizações de bateria: ${e.message}", e)
             }
+        }
+    }
+    
+    /**
+     * Solicita ao usuário para desativar otimizações de bateria
+     */
+    private fun requestBatteryOptimizationDisable() {
+        try {
+            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                data = Uri.parse("package:$packageName")
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            
+            // Criar notificação para guiar o usuário
+            val notificationManager = NotificationManagerCompat.from(this)
+            if (notificationManager.areNotificationsEnabled()) {
+                val notificationIntent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+                val pendingIntent = PendingIntent.getActivity(
+                    this, 0, notificationIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+                
+                val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+                    .setContentTitle("⚠️ Otimizações de Bateria Ativas")
+                    .setContentText("Para melhor funcionamento, desative otimizações de bateria")
+                    .setSmallIcon(R.mipmap.ic_launcher)
+                    .setPriority(NotificationCompat.PRIORITY_HIGH)
+                    .setContentIntent(pendingIntent)
+                    .setAutoCancel(true)
+                    .build()
+                
+                notificationManager.notify(NOTIFICATION_ID + 1, notification)
+                Log.d(TAG, "Notificação de otimizações de bateria enviada")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Erro ao solicitar desativação de otimizações: ${e.message}", e)
         }
     }
     
@@ -491,6 +547,123 @@ class PythonServerService : Service() {
         Log.d(TAG, "Monitoramento de heartbeat iniciado (verifica a cada ${HEARTBEAT_MONITOR_INTERVAL / 1000 / 60} minutos)")
     }
     
+    /**
+     * Executa heartbeat diretamente no serviço a cada 15 minutos
+     * Isso funciona como fallback caso o WorkManager não execute
+     */
+    private fun startDirectHeartbeat() {
+        heartbeatDirectJob?.cancel()
+        
+        heartbeatDirectJob = coroutineScope.launch {
+            // Aguardar um pouco antes da primeira execução
+            delay(HEARTBEAT_DIRECT_INTERVAL)
+            
+            while (isActive) {
+                try {
+                    Log.d(TAG, "🔄 Heartbeat direto no serviço executando (fallback)...")
+                    
+                    // Verificar se servidor está rodando
+                    if (checkServerHealth()) {
+                        // Executar heartbeat diretamente
+                        executeDirectHeartbeat()
+                    } else {
+                        Log.w(TAG, "Servidor não está respondendo, pulando heartbeat direto")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Erro ao executar heartbeat direto: ${e.message}", e)
+                }
+                
+                delay(HEARTBEAT_DIRECT_INTERVAL)
+            }
+        }
+        
+        Log.d(TAG, "Heartbeat direto no serviço iniciado (executa a cada ${HEARTBEAT_DIRECT_INTERVAL / 1000 / 60} minutos)")
+    }
+    
+    /**
+     * Executa heartbeat diretamente (sem WorkManager)
+     */
+    private suspend fun executeDirectHeartbeat() {
+        try {
+            val prefs = getSharedPreferences("TuyaGateway", Context.MODE_PRIVATE)
+            
+            // Buscar device_id
+            var deviceId = prefs.getString("heartbeat_device_id", null)
+            if (deviceId.isNullOrEmpty()) {
+                deviceId = prefs.getString("device_id", null)
+            }
+            
+            if (deviceId.isNullOrEmpty()) {
+                // Tentar buscar do cache
+                val deviceCacheManager = com.mritsoftware.mritserver.service.DeviceCacheManager(this)
+                val cachedDevices = deviceCacheManager.loadDevicesAsMap()
+                if (cachedDevices != null && cachedDevices.isNotEmpty()) {
+                    deviceId = cachedDevices.keys.firstOrNull()
+                }
+            }
+            
+            if (deviceId.isNullOrEmpty()) {
+                Log.w(TAG, "Device ID não encontrado, pulando heartbeat direto")
+                return
+            }
+            
+            // Enviar heartbeat diretamente
+            val url = java.net.URL("http://127.0.0.1:8000/tuya/heartbeat")
+            val connection = url.openConnection() as java.net.HttpURLConnection
+            connection.requestMethod = "POST"
+            connection.setRequestProperty("Content-Type", "application/json")
+            connection.doOutput = true
+            connection.connectTimeout = 10000
+            connection.readTimeout = 10000
+            
+            val jsonBody = org.json.JSONObject().apply {
+                put("tuya_device_id", deviceId)
+            }
+            
+            val writer = java.io.OutputStreamWriter(connection.outputStream, "UTF-8")
+            writer.write(jsonBody.toString())
+            writer.flush()
+            writer.close()
+            
+            val responseCode = connection.responseCode
+            
+            if (responseCode == 200) {
+                val reader = java.io.BufferedReader(java.io.InputStreamReader(connection.inputStream))
+                val response = reader.readText()
+                reader.close()
+                
+                try {
+                    val json = org.json.JSONObject(response)
+                    val ok = json.optBoolean("ok", false)
+                    if (ok) {
+                        // Salvar timestamp
+                        prefs.edit()
+                            .putString("heartbeat_device_id", deviceId)
+                            .putLong("last_heartbeat_time", System.currentTimeMillis())
+                            .apply()
+                        Log.d(TAG, "✅ Heartbeat direto enviado com sucesso para device $deviceId")
+                    } else {
+                        val error = json.optString("error", "Erro desconhecido")
+                        Log.w(TAG, "Servidor retornou ok=false no heartbeat direto: $error")
+                    }
+                } catch (e: Exception) {
+                    // Se resposta não for JSON válido, mas código foi 200, considerar sucesso
+                    prefs.edit()
+                        .putString("heartbeat_device_id", deviceId)
+                        .putLong("last_heartbeat_time", System.currentTimeMillis())
+                        .apply()
+                    Log.d(TAG, "✅ Heartbeat direto enviado (resposta não-JSON, mas código 200)")
+                }
+            } else {
+                Log.w(TAG, "Erro HTTP ao enviar heartbeat direto: $responseCode")
+            }
+            
+            connection.disconnect()
+        } catch (e: Exception) {
+            Log.e(TAG, "Erro ao executar heartbeat direto: ${e.message}", e)
+        }
+    }
+    
     override fun onDestroy() {
         super.onDestroy()
         
@@ -507,6 +680,10 @@ class PythonServerService : Service() {
         // Parar monitoramento de heartbeat
         heartbeatMonitorJob?.cancel()
         heartbeatMonitorJob = null
+        
+        // Parar heartbeat direto
+        heartbeatDirectJob?.cancel()
+        heartbeatDirectJob = null
         
         // Parar monitoramento de IP
         localIpMonitor?.stopMonitoring()

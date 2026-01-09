@@ -874,13 +874,33 @@ def api_tuya_command():
             except (ValueError, TypeError):
                 version = None
         
-        send_tuya_command(
-            action=action,
-            tuya_device_id=tuya_device_id,
-            local_key=local_key,
-            lan_ip=lan_ip,
-            version=version
-        )
+        # Enviar comando para o dispositivo
+        try:
+            send_tuya_command(
+                action=action,
+                tuya_device_id=tuya_device_id,
+                local_key=local_key,
+                lan_ip=lan_ip,
+                version=version
+            )
+            command_success = True
+        except Exception as cmd_error:
+            log(f"[COMMAND] Erro ao enviar comando: {cmd_error}")
+            raise  # Re-raise para retornar erro 500
+        
+        # Enviar heartbeat imediatamente após comando bem-sucedido
+        # Isso garante que servidor_online seja atualizado mesmo se próximo ciclo falhar
+        if command_success:
+            try:
+                log(f"[COMMAND] Comando bem-sucedido, enviando heartbeat imediato...")
+                heartbeat_success = update_device_heartbeat(tuya_device_id)
+                if heartbeat_success:
+                    log(f"[COMMAND] ✅ Heartbeat enviado com sucesso após comando")
+                else:
+                    log(f"[COMMAND] ⚠️ Heartbeat falhou após comando (não crítico, será tentado no próximo ciclo)")
+            except Exception as heartbeat_error:
+                log(f"[COMMAND] ⚠️ Erro ao enviar heartbeat após comando: {heartbeat_error}")
+                # Não falhar o comando se heartbeat falhar - heartbeat periódico vai tentar depois
         
         # Sempre retornar dados do dispositivo para atualizar cache no cliente
         # Isso garante que o cache seja atualizado mesmo quando não usa fallback
