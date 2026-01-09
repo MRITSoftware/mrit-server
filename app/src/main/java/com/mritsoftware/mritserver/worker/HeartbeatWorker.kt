@@ -3,10 +3,13 @@ package com.mritsoftware.mritserver.worker
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
+import androidx.work.BackoffPolicy
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import java.util.concurrent.TimeUnit
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -38,8 +41,21 @@ class HeartbeatWorker(
             // Verificar se o servidor está rodando
             val serverRunning = checkServerHealth()
             if (!serverRunning) {
-                Log.w(TAG, "Servidor não está respondendo, pulando heartbeat")
-                return androidx.work.ListenableWorker.Result.retry() // Tentar novamente mais tarde
+                val runAttemptCount = runAttemptCount
+                Log.w(TAG, "Servidor não está respondendo (tentativa $runAttemptCount), aguardando e tentando novamente...")
+                
+                // Aguardar um pouco antes de retry (backoff exponencial)
+                val delaySeconds = minOf(30L, (1L shl minOf(runAttemptCount, 5)).toLong()) // Max 30 segundos
+                delay(delaySeconds * 1000)
+                
+                // Verificar novamente antes de retry
+                val serverRunningRetry = checkServerHealth()
+                if (!serverRunningRetry) {
+                    Log.w(TAG, "Servidor ainda não está respondendo após aguardar, retry...")
+                    return androidx.work.ListenableWorker.Result.retry() // Tentar novamente mais tarde
+                } else {
+                    Log.d(TAG, "Servidor voltou a responder após aguardar, continuando...")
+                }
             }
             
             val sharedPreferences = applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -77,18 +93,33 @@ class HeartbeatWorker(
                 return androidx.work.ListenableWorker.Result.success() // Não é erro, apenas não há device configurado
             }
             
-            // Chamar endpoint de heartbeat
-            val success = sendHeartbeat(deviceId)
+            // Chamar endpoint de heartbeat com retry automático
+            var success = false
+            var attempts = 0
+            val maxAttempts = 3
+            
+            while (!success && attempts < maxAttempts) {
+                attempts++
+                Log.d(TAG, "Tentando enviar heartbeat (tentativa $attempts/$maxAttempts)...")
+                
+                success = sendHeartbeat(deviceId)
+                
+                if (!success && attempts < maxAttempts) {
+                    Log.w(TAG, "Falha ao enviar heartbeat, aguardando 5 segundos antes de tentar novamente...")
+                    delay(5000) // Aguardar 5 segundos entre tentativas
+                }
+            }
             
             if (success) {
                 // Salvar device_id no app state para usar como fallback no próximo heartbeat
                 sharedPreferences.edit()
                     .putString(KEY_SAVED_DEVICE_ID, deviceId)
+                    .putLong("last_heartbeat_time", System.currentTimeMillis()) // Salvar timestamp
                     .apply()
-                Log.d(TAG, "Heartbeat enviado com sucesso para device $deviceId (salvo no app state)")
+                Log.d(TAG, "✅ Heartbeat enviado com sucesso para device $deviceId após $attempts tentativa(s)")
                 androidx.work.ListenableWorker.Result.success()
             } else {
-                Log.w(TAG, "Falha ao enviar heartbeat, tentando novamente mais tarde")
+                Log.e(TAG, "❌ Falha ao enviar heartbeat após $maxAttempts tentativas, retry agendado")
                 // Não limpar o device_id salvo, para usar como fallback na próxima tentativa
                 androidx.work.ListenableWorker.Result.retry()
             }
@@ -100,17 +131,43 @@ class HeartbeatWorker(
     
     private suspend fun checkServerHealth(): Boolean = withContext(Dispatchers.IO) {
         return@withContext try {
+            // Verificar conectividade antes de testar servidor
+            val connectivityManager = applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
+            val network = connectivityManager?.activeNetwork
+            val capabilities = network?.let { connectivityManager.getNetworkCapabilities(it) }
+            
+            val hasWifi = capabilities?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) == true
+            val hasInternet = capabilities?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+            
+            if (!hasWifi && !hasInternet) {
+                Log.w(TAG, "WiFi não está conectado, pulando heartbeat")
+                return@withContext false
+            }
+            
             val url = URL("http://127.0.0.1:8000/health")
             val connection = url.openConnection() as HttpURLConnection
             connection.requestMethod = "GET"
-            connection.connectTimeout = 3000
-            connection.readTimeout = 3000
+            connection.connectTimeout = 5000 // Aumentar timeout para redes mais lentas
+            connection.readTimeout = 5000
             
             val responseCode = connection.responseCode
             connection.disconnect()
             
-            responseCode == 200
+            if (responseCode == 200) {
+                Log.d(TAG, "Servidor está respondendo (WiFi: $hasWifi)")
+                true
+            } else {
+                Log.w(TAG, "Servidor retornou código $responseCode (WiFi: $hasWifi)")
+                false
+            }
+        } catch (e: java.net.SocketTimeoutException) {
+            Log.w(TAG, "Timeout ao verificar servidor (rede pode estar lenta): ${e.message}")
+            false
+        } catch (e: java.net.ConnectException) {
+            Log.w(TAG, "Erro de conexão (servidor offline ou rede bloqueada): ${e.message}")
+            false
         } catch (e: Exception) {
+            Log.w(TAG, "Erro ao verificar servidor: ${e.javaClass.simpleName} - ${e.message}")
             false
         }
     }

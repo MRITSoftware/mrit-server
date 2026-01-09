@@ -34,18 +34,30 @@ object HeartbeatService {
                 .build()
             
             // Executar heartbeat IMEDIATAMENTE ao sincronizar
+            // Usar backoff exponencial para retry automático
             val immediateHeartbeat = OneTimeWorkRequestBuilder<HeartbeatWorker>()
                 .setConstraints(constraints)
+                .setBackoffCriteria(
+                    androidx.work.BackoffPolicy.EXPONENTIAL,
+                    15, // Começar com 15 segundos
+                    TimeUnit.SECONDS
+                )
                 .addTag("${WORK_NAME}_immediate")
                 .build()
             
             // Agendar heartbeat periódico a cada 15 minutos
             // WorkManager requer mínimo de 15 minutos para PeriodicWorkRequest
+            // Usar backoff exponencial para retry automático
             val heartbeatWork = PeriodicWorkRequestBuilder<HeartbeatWorker>(
                 15, // Intervalo mínimo permitido pelo WorkManager
                 TimeUnit.MINUTES
             )
                 .setConstraints(constraints)
+                .setBackoffCriteria(
+                    androidx.work.BackoffPolicy.EXPONENTIAL,
+                    15, // Começar com 15 segundos
+                    TimeUnit.SECONDS
+                )
                 .addTag(WORK_NAME)
                 .build()
             
@@ -68,6 +80,30 @@ object HeartbeatService {
                 if (workInfos.isNotEmpty()) {
                     val workInfo = workInfos[0]
                     Log.d(TAG, "Status do WorkManager: ${workInfo.state}, tentativas: ${workInfo.runAttemptCount}")
+                    
+                    // Se o trabalho está bloqueado ou enfileirado, logar aviso
+                    when (workInfo.state) {
+                        androidx.work.WorkInfo.State.BLOCKED -> {
+                            Log.w(TAG, "⚠️ WorkManager está BLOQUEADO - pode não executar")
+                        }
+                        androidx.work.WorkInfo.State.ENQUEUED -> {
+                            Log.d(TAG, "✅ WorkManager está ENFILEIRADO - aguardando condições")
+                        }
+                        androidx.work.WorkInfo.State.RUNNING -> {
+                            Log.d(TAG, "🔄 WorkManager está EXECUTANDO")
+                        }
+                        androidx.work.WorkInfo.State.SUCCEEDED -> {
+                            Log.d(TAG, "✅ WorkManager executou com SUCESSO")
+                        }
+                        androidx.work.WorkInfo.State.FAILED -> {
+                            Log.e(TAG, "❌ WorkManager FALHOU")
+                        }
+                        androidx.work.WorkInfo.State.CANCELLED -> {
+                            Log.w(TAG, "⚠️ WorkManager foi CANCELADO")
+                        }
+                    }
+                } else {
+                    Log.w(TAG, "⚠️ Nenhum trabalho encontrado no WorkManager")
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "Não foi possível verificar status do WorkManager: ${e.message}")
