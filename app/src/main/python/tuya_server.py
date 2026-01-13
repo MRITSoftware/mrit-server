@@ -178,7 +178,94 @@ DEFAULT_TUYA_ACCOUNTS = [
     }
 ]
 
+def fetch_tuya_accounts_from_database() -> List[Dict[str, Any]]:
+    """
+    Busca contas Tuya da tabela contas_tuya no Supabase.
+    Retorna apenas contas com enabled=true.
+    """
+    if not REQUESTS_AVAILABLE:
+        log("[DB] requests não está disponível para buscar contas Tuya")
+        return []
+    
+    if not SUPABASE_CONFIG.get("url") or not SUPABASE_CONFIG.get("anon_key"):
+        log("[DB] Configuração do Supabase não encontrada para buscar contas Tuya")
+        return []
+    
+    try:
+        base_url = get_supabase_url()
+        headers = get_supabase_headers()
+        
+        # Buscar contas Tuya com enabled=true
+        url = f"{base_url}/contas_tuya?enabled=eq.true&select=access_id,access_key,endpoint,uid,label"
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        accounts = response.json()
+        
+        if not accounts:
+            log("[DB] Nenhuma conta Tuya habilitada encontrada no banco")
+            return []
+        
+        # Converter para formato esperado (remover campos extras como 'label')
+        formatted_accounts = []
+        for account in accounts:
+            formatted_accounts.append({
+                "access_id": account.get("access_id"),
+                "access_key": account.get("access_key"),
+                "endpoint": account.get("endpoint"),
+                "uid": account.get("uid")
+            })
+        
+        log(f"[DB] {len(formatted_accounts)} conta(s) Tuya encontrada(s) no banco")
+        return formatted_accounts
+        
+    except requests.exceptions.HTTPError as e:
+        log(f"[DB] Erro HTTP ao buscar contas Tuya: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            log(f"[DB] Response: {e.response.text}")
+        return []
+    except Exception as e:
+        log(f"[DB] Erro ao buscar contas Tuya do banco: {e}")
+        traceback.print_exc()
+        return []
+
+def sync_tuya_accounts_from_database():
+    """
+    Sincroniza contas Tuya do banco de dados e salva localmente.
+    Só atualiza se não houver contas locais ou se forçado.
+    """
+    # Se já há contas locais, não atualizar (evita sobrescrever configuração manual)
+    if TUYA_ACCOUNTS:
+        log("[SYNC] Contas Tuya já existem localmente, pulando sincronização do banco")
+        return False
+    
+    log("[SYNC] Buscando contas Tuya do banco de dados...")
+    accounts = fetch_tuya_accounts_from_database()
+    
+    if accounts:
+        try:
+            update_tuya_accounts(accounts)
+            log(f"[SYNC] ✅ {len(accounts)} conta(s) Tuya sincronizada(s) do banco e salva(s) localmente")
+            return True
+        except Exception as e:
+            log(f"[SYNC] ❌ Erro ao salvar contas Tuya: {e}")
+            return False
+    else:
+        # Se não encontrou no banco, usar contas padrão como fallback
+        log("[SYNC] Nenhuma conta encontrada no banco, usando contas padrão como fallback")
+        try:
+            update_tuya_accounts(DEFAULT_TUYA_ACCOUNTS)
+            log(f"[SYNC] Contas Tuya padrão configuradas: {len(DEFAULT_TUYA_ACCOUNTS)} conta(s)")
+            return True
+        except Exception as e:
+            log(f"[SYNC] Erro ao configurar contas padrão: {e}")
+            return False
+
+# Tentar sincronizar contas do banco na inicialização (se não houver contas locais)
 if not TUYA_ACCOUNTS:
+    sync_tuya_accounts_from_database()
+elif not TUYA_ACCOUNTS:
+    # Fallback: usar contas padrão se sincronização falhou
     try:
         update_tuya_accounts(DEFAULT_TUYA_ACCOUNTS)
         log(f"[INFO] Contas Tuya configuradas automaticamente: {len(DEFAULT_TUYA_ACCOUNTS)} conta(s)")
@@ -814,6 +901,50 @@ def api_config_tuya():
         traceback.print_exc()
         return jsonify({"ok": False, "error": err}), 500
 
+@app.route("/config/tuya/sync", methods=["POST"])
+def api_sync_tuya_accounts():
+    """
+    Sincroniza contas Tuya do banco de dados (tabela contas_tuya) e salva localmente.
+    Força atualização mesmo se já houver contas locais.
+    
+    Body opcional:
+    {
+        "force": true  // Se true, força atualização mesmo se já houver contas locais
+    }
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        force = data.get("force", False)
+        
+        # Se force=true, limpar contas locais antes de sincronizar
+        if force:
+            global TUYA_ACCOUNTS
+            TUYA_ACCOUNTS = []
+            log("[SYNC] Forçando sincronização de contas Tuya do banco...")
+        
+        # Buscar contas do banco
+        accounts = fetch_tuya_accounts_from_database()
+        
+        if accounts:
+            update_tuya_accounts(accounts)
+            return jsonify({
+                "ok": True,
+                "message": f"{len(accounts)} conta(s) Tuya sincronizada(s) do banco",
+                "accounts_count": len(accounts)
+            }), 200
+        else:
+            # Se não encontrou no banco, retornar erro (não usar fallback padrão via API)
+            return jsonify({
+                "ok": False,
+                "error": "Nenhuma conta Tuya habilitada encontrada no banco de dados"
+            }), 404
+        
+    except Exception as e:
+        err = str(e)
+        log(f"[ERRO] API /config/tuya/sync: {err}")
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": err}), 500
+
 @app.route("/config/supabase", methods=["POST"])
 def api_config_supabase():
     """
@@ -1174,10 +1305,11 @@ def fetch_local_key_from_tuya_api(tuya_device_id: str) -> Optional[str]:
 def api_sync_devices():
     """
     Sincroniza devices encontrados na rede LAN com a tabela tuya_devices.
+    Também sincroniza contas Tuya do banco se for a primeira vez ou se não houver contas locais.
     Para cada device encontrado na rede, se existir na tabela com mesmo tuya_device_id,
     atualiza: lan_ip, protocol_version (sempre que disponíveis do scan).
     Opcionalmente pode receber site_id, name e local_key no body para atualizar também.
-    
+
     Body opcional:
     {
         "site_id": "Nome da Unidade",
@@ -1192,6 +1324,16 @@ def api_sync_devices():
     """
     try:
         log("[SYNC] Iniciando sincronização de devices...")
+        
+        # Sincronizar contas Tuya do banco antes de sincronizar dispositivos
+        # Isso garante que as contas estejam atualizadas quando precisar buscar local_key
+        if not TUYA_ACCOUNTS:
+            log("[SYNC] Nenhuma conta Tuya local encontrada, sincronizando do banco...")
+            try:
+                sync_tuya_accounts_from_database()
+            except Exception as e:
+                log(f"[SYNC] Aviso: Não foi possível sincronizar contas Tuya: {e}")
+                # Continuar mesmo se falhar, pode usar contas padrão
         
         # Ler dados opcionais do body
         body_data = request.get_json(silent=True) or {}

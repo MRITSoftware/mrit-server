@@ -261,20 +261,58 @@ class HeartbeatWorker(
                     // Obter SSID (nome da rede)
                     try {
                         val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                        var ssid: String? = null
+                        
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                            // Android 10+ requer permissão especial, mas podemos tentar
-                            val wifiInfo = wifiManager?.connectionInfo
-                            val ssid = wifiInfo?.ssid?.replace("\"", "") // Remover aspas
-                            if (ssid != null && ssid != "<unknown ssid>") {
-                                info["wifi_ssid"] = ssid
+                            // Android 10+: Tentar múltiplas abordagens
+                            
+                            // Método 1: Via NetworkCapabilities (pode funcionar em alguns casos)
+                            try {
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                                    // Android 11+: Usar getTransportInfo()
+                                    val transportInfo = capabilities.transportInfo
+                                    if (transportInfo is WifiInfo) {
+                                        val ssidFromCapabilities = transportInfo.ssid?.replace("\"", "")
+                                        if (ssidFromCapabilities != null && 
+                                            ssidFromCapabilities != "<unknown ssid>" && 
+                                            ssidFromCapabilities.isNotBlank()) {
+                                            ssid = ssidFromCapabilities
+                                            Log.d(TAG, "SSID obtido via NetworkCapabilities (Android 11+): $ssid")
+                                        }
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                Log.d(TAG, "Método NetworkCapabilities falhou: ${e.message}")
+                            }
+                            
+                            // Método 2: Via WifiManager (fallback)
+                            if (ssid == null) {
+                                val wifiInfo = wifiManager?.connectionInfo
+                                val ssidFromWifi = wifiInfo?.ssid?.replace("\"", "")
+                                if (ssidFromWifi != null && 
+                                    ssidFromWifi != "<unknown ssid>" && 
+                                    ssidFromWifi.isNotBlank()) {
+                                    ssid = ssidFromWifi
+                                    Log.d(TAG, "SSID obtido via WifiManager: $ssid")
+                                } else {
+                                    Log.w(TAG, "SSID não disponível (Android 10+ bloqueia por privacidade)")
+                                }
                             }
                         } else {
+                            // Android 9 e anteriores: Método tradicional
                             @Suppress("DEPRECATION")
                             val wifiInfo = wifiManager?.connectionInfo
-                            val ssid = wifiInfo?.ssid?.replace("\"", "")
-                            if (ssid != null && ssid != "<unknown ssid>") {
-                                info["wifi_ssid"] = ssid
+                            val ssidFromWifi = wifiInfo?.ssid?.replace("\"", "")
+                            if (ssidFromWifi != null && 
+                                ssidFromWifi != "<unknown ssid>" && 
+                                ssidFromWifi.isNotBlank()) {
+                                ssid = ssidFromWifi
+                                Log.d(TAG, "SSID obtido: $ssid")
                             }
+                        }
+                        
+                        if (ssid != null) {
+                            info["wifi_ssid"] = ssid
                         }
                     } catch (e: Exception) {
                         Log.w(TAG, "Erro ao obter SSID: ${e.message}")
