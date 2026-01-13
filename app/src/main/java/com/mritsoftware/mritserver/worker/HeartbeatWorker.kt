@@ -2,6 +2,12 @@ package com.mritsoftware.mritserver.worker
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.net.wifi.WifiInfo
+import android.net.wifi.WifiManager
+import android.os.BatteryManager
+import android.os.Build
 import android.util.Log
 import androidx.work.BackoffPolicy
 import androidx.work.CoroutineWorker
@@ -182,8 +188,15 @@ class HeartbeatWorker(
             connection.connectTimeout = 10000
             connection.readTimeout = 10000
             
+            // Coletar informações do dispositivo
+            val deviceInfo = collectDeviceInfo()
+            
             val jsonBody = JSONObject().apply {
                 put("tuya_device_id", deviceId)
+                // Adicionar informações do dispositivo se disponíveis
+                deviceInfo["wifi_ssid"]?.let { put("wifi_ssid", it) }
+                deviceInfo["wifi_speed"]?.let { put("wifi_speed", it) }
+                deviceInfo["battery_level"]?.let { put("battery_level", it) }
             }
             
             val writer = OutputStreamWriter(connection.outputStream, "UTF-8")
@@ -228,5 +241,85 @@ class HeartbeatWorker(
             Log.e(TAG, "Erro ao enviar heartbeat: ${e.message}", e)
             return@withContext false
         }
+    }
+    
+    /**
+     * Coleta informações do dispositivo: SSID, velocidade WiFi e nível de bateria
+     */
+    private fun collectDeviceInfo(): Map<String, Any?> {
+        val info = mutableMapOf<String, Any?>()
+        
+        try {
+            // Obter informações de WiFi
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val connectivityManager = applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                val network = connectivityManager?.activeNetwork
+                val capabilities = network?.let { connectivityManager.getNetworkCapabilities(it) }
+                
+                // Verificar se está conectado via WiFi
+                if (capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) {
+                    // Obter SSID (nome da rede)
+                    try {
+                        val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                            // Android 10+ requer permissão especial, mas podemos tentar
+                            val wifiInfo = wifiManager?.connectionInfo
+                            val ssid = wifiInfo?.ssid?.replace("\"", "") // Remover aspas
+                            if (ssid != null && ssid != "<unknown ssid>") {
+                                info["wifi_ssid"] = ssid
+                            }
+                        } else {
+                            @Suppress("DEPRECATION")
+                            val wifiInfo = wifiManager?.connectionInfo
+                            val ssid = wifiInfo?.ssid?.replace("\"", "")
+                            if (ssid != null && ssid != "<unknown ssid>") {
+                                info["wifi_ssid"] = ssid
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Erro ao obter SSID: ${e.message}")
+                    }
+                    
+                    // Obter velocidade do link (Link Speed)
+                    try {
+                        val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                        val wifiInfo = wifiManager?.connectionInfo
+                        val linkSpeed = wifiInfo?.linkSpeed // Em Mbps
+                        if (linkSpeed != null && linkSpeed > 0) {
+                            info["wifi_speed"] = linkSpeed
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Erro ao obter velocidade WiFi: ${e.message}")
+                    }
+                }
+            }
+            
+            // Obter nível de bateria
+            try {
+                val batteryManager = applicationContext.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                    val batteryLevel = batteryManager?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+                    if (batteryLevel != null && batteryLevel >= 0) {
+                        info["battery_level"] = batteryLevel
+                    }
+                } else {
+                    @Suppress("DEPRECATION")
+                    val intent = android.content.Intent(android.content.Intent.ACTION_BATTERY_CHANGED)
+                    val batteryLevel = intent.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1)
+                    val scale = intent.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, -1)
+                    if (batteryLevel >= 0 && scale > 0) {
+                        val level = (batteryLevel * 100 / scale.toFloat()).toInt()
+                        info["battery_level"] = level
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Erro ao obter nível de bateria: ${e.message}")
+            }
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Erro ao coletar informações do dispositivo: ${e.message}", e)
+        }
+        
+        return info
     }
 }

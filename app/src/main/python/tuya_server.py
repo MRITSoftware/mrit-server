@@ -339,10 +339,22 @@ def create_device_in_db(
         traceback.print_exc()
         return False
 
-def update_device_heartbeat(tuya_device_id: str) -> bool:
+def update_device_heartbeat(
+    tuya_device_id: str,
+    wifi_ssid: Optional[str] = None,
+    wifi_speed: Optional[int] = None,
+    battery_level: Optional[int] = None
+) -> bool:
     """
     Atualiza o campo servidor_online de um device (heartbeat/ping).
     Primeiro tenta fazer ping na placa física, depois atualiza o banco.
+    Também atualiza informações adicionais: SSID, velocidade WiFi e nível de bateria.
+    
+    Args:
+        tuya_device_id: ID do dispositivo Tuya
+        wifi_ssid: Nome da rede WiFi (opcional)
+        wifi_speed: Velocidade do link WiFi em Mbps (opcional)
+        battery_level: Nível de bateria 0-100 (opcional)
     """
     if not REQUESTS_AVAILABLE:
         log("[DB] requests não está disponível")
@@ -411,10 +423,26 @@ def update_device_heartbeat(tuya_device_id: str) -> bool:
         # Atualizar usando Supabase REST API
         url = f"{base_url}/tuya_devices?tuya_device_id=eq.{tuya_device_id}"
         
-        # Atualizar apenas o campo servidor_online com timestamp atual
+        # Atualizar servidor_online e informações adicionais
         update_data = {"servidor_online": timestamp_iso}
         
-        log(f"[HEARTBEAT] Atualizando servidor_online para device {tuya_device_id} (timestamp: {timestamp_iso}, placa online: {device_online})")
+        # Adicionar informações adicionais se fornecidas
+        if wifi_ssid is not None:
+            update_data["wifi_ssid"] = wifi_ssid
+        if wifi_speed is not None:
+            update_data["wifi_speed"] = wifi_speed
+        if battery_level is not None:
+            update_data["battery_level"] = battery_level
+        
+        info_str = f"timestamp: {timestamp_iso}, placa online: {device_online}"
+        if wifi_ssid:
+            info_str += f", SSID: {wifi_ssid}"
+        if wifi_speed:
+            info_str += f", Velocidade: {wifi_speed} Mbps"
+        if battery_level is not None:
+            info_str += f", Bateria: {battery_level}%"
+        
+        log(f"[HEARTBEAT] Atualizando servidor_online para device {tuya_device_id} ({info_str})")
         
         # Usar PATCH com Prefer: return=minimal para não retornar dados
         headers_with_prefer = {**headers, "Prefer": "return=minimal,resolution=merge-duplicates"}
@@ -731,6 +759,13 @@ def send_tuya_command(
 
 app = Flask(__name__)
 
+# Lista de portas alternativas para tentar se porta padrão falhar
+ALTERNATIVE_PORTS = [8000, 8080, 8888, 3000, 5000, 9000]
+
+# Fila de comandos pendentes para polling reverso (funciona mesmo com firewall/AP Isolation)
+# Estrutura: {tuya_device_id: [comando1, comando2, ...]}
+PENDING_COMMANDS_QUEUE: Dict[str, List[Dict[str, Any]]] = {}
+
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok", "site": SITE_NAME}), 200
@@ -814,8 +849,86 @@ def api_config_supabase():
         traceback.print_exc()
         return jsonify({"ok": False, "error": err}), 500
 
+@app.route("/tuya/devices", methods=["GET"])
+def api_tuya_devices():
+    """Retorna lista de dispositivos escaneados na rede"""
+    try:
+        devices = scan_devices()
+        device_list = []
+        for gwid, dev_info in devices.items():
+            device_list.append({
+                "id": gwid,
+                "ip": dev_info.get("ip", ""),
+                "version": dev_info.get("version", "")
+            })
+        return jsonify({"ok": True, "devices": device_list}), 200
+    except Exception as e:
+        err = str(e)
+        log(f"[ERRO] API /tuya/devices: {err}")
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": err}), 500
+
+@app.route("/tuya/poll", methods=["GET"])
+def api_tuya_poll():
+    """
+    Endpoint para polling reverso - cliente verifica se há comandos pendentes.
+    Funciona mesmo com firewall/AP Isolation porque cliente inicia a conexão.
+    
+    Query params:
+    - tuya_device_id: ID do dispositivo Tuya
+    - timeout: Tempo máximo para aguardar comandos (opcional, padrão: 5 segundos)
+    
+    Retorna:
+    {
+        "ok": true,
+        "has_commands": true/false,
+        "commands": [comando1, comando2, ...]  # Só se has_commands=true
+    }
+    """
+    try:
+        tuya_device_id = request.args.get("tuya_device_id")
+        timeout = int(request.args.get("timeout", 5))
+        
+        if not tuya_device_id:
+            return jsonify({
+                "ok": False,
+                "error": "tuya_device_id é obrigatório"
+            }), 400
+        
+        # Verificar se há comandos pendentes para este dispositivo
+        if tuya_device_id in PENDING_COMMANDS_QUEUE and len(PENDING_COMMANDS_QUEUE[tuya_device_id]) > 0:
+            # Retornar todos os comandos pendentes
+            commands = PENDING_COMMANDS_QUEUE[tuya_device_id].copy()
+            # Limpar fila após retornar
+            PENDING_COMMANDS_QUEUE[tuya_device_id] = []
+            
+            log(f"[POLL] Cliente consultou comandos pendentes para {tuya_device_id}: {len(commands)} comando(s)")
+            
+            return jsonify({
+                "ok": True,
+                "has_commands": True,
+                "commands": commands
+            }), 200
+        else:
+            # Não há comandos pendentes
+            return jsonify({
+                "ok": True,
+                "has_commands": False,
+                "commands": []
+            }), 200
+    
+    except Exception as e:
+        err = str(e)
+        log(f"[ERRO] API /tuya/poll: {err}")
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": err}), 500
+
 @app.route("/tuya/command", methods=["POST"])
 def api_tuya_command():
+    """
+    Endpoint para enviar comando.
+    Se não conseguir enviar diretamente (firewall/AP Isolation), adiciona à fila para polling.
+    """
     try:
         data: Dict[str, Any] = request.get_json(force=True, silent=True) or {}
         
@@ -874,7 +987,7 @@ def api_tuya_command():
             except (ValueError, TypeError):
                 version = None
         
-        # Enviar comando para o dispositivo
+        # Tentar enviar comando diretamente
         try:
             send_tuya_command(
                 action=action,
@@ -884,12 +997,28 @@ def api_tuya_command():
                 version=version
             )
             command_success = True
+            log(f"[COMMAND] Comando enviado diretamente com sucesso")
         except Exception as cmd_error:
-            log(f"[COMMAND] Erro ao enviar comando: {cmd_error}")
-            raise  # Re-raise para retornar erro 500
+            log(f"[COMMAND] Erro ao enviar comando diretamente: {cmd_error}")
+            log(f"[COMMAND] Adicionando comando à fila para polling reverso...")
+            command_success = False
+            
+            # Adicionar comando à fila para polling reverso
+            if tuya_device_id not in PENDING_COMMANDS_QUEUE:
+                PENDING_COMMANDS_QUEUE[tuya_device_id] = []
+            
+            command_data = {
+                "action": action,
+                "tuya_device_id": tuya_device_id,
+                "local_key": local_key,
+                "lan_ip": lan_ip,
+                "version": version,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+            PENDING_COMMANDS_QUEUE[tuya_device_id].append(command_data)
+            log(f"[COMMAND] Comando adicionado à fila. Total na fila: {len(PENDING_COMMANDS_QUEUE[tuya_device_id])}")
         
         # Enviar heartbeat imediatamente após comando bem-sucedido
-        # Isso garante que servidor_online seja atualizado mesmo se próximo ciclo falhar
         if command_success:
             try:
                 log(f"[COMMAND] Comando bem-sucedido, enviando heartbeat imediato...")
@@ -903,9 +1032,10 @@ def api_tuya_command():
                 # Não falhar o comando se heartbeat falhar - heartbeat periódico vai tentar depois
         
         # Sempre retornar dados do dispositivo para atualizar cache no cliente
-        # Isso garante que o cache seja atualizado mesmo quando não usa fallback
         response_data = {
             "ok": True,
+            "command_sent": command_success,
+            "use_polling": not command_success,  # Indica se deve usar polling
             "device": {
                 "id": tuya_device_id,
                 "ip": str(lan_ip) if lan_ip else "",
@@ -913,6 +1043,10 @@ def api_tuya_command():
                 "local_key": local_key or ""
             }
         }
+        
+        if not command_success:
+            response_data["message"] = "Comando adicionado à fila. Use /tuya/poll para receber comandos."
+            response_data["poll_url"] = f"/tuya/poll?tuya_device_id={tuya_device_id}"
         
         if used_fallback:
             log(f"[COMMAND] Retornando dados do dispositivo (usado fallback do banco)")
@@ -927,34 +1061,19 @@ def api_tuya_command():
         traceback.print_exc()
         return jsonify({"ok": False, "error": err}), 500
 
-@app.route("/tuya/devices", methods=["GET"])
-def api_tuya_devices():
-    """Retorna lista de dispositivos escaneados na rede"""
-    try:
-        devices = scan_devices()
-        device_list = []
-        for gwid, dev_info in devices.items():
-            device_list.append({
-                "id": gwid,
-                "ip": dev_info.get("ip", ""),
-                "version": dev_info.get("version", "")
-            })
-        return jsonify({"ok": True, "devices": device_list}), 200
-    except Exception as e:
-        err = str(e)
-        log(f"[ERRO] API /tuya/devices: {err}")
-        traceback.print_exc()
-        return jsonify({"ok": False, "error": err}), 500
-
 @app.route("/tuya/heartbeat", methods=["POST"])
 def api_tuya_heartbeat():
     """
     Atualiza o campo servidor_online de um dispositivo (heartbeat/ping).
     Atualiza com o timestamp atual para indicar que o servidor está online.
+    Também atualiza informações adicionais: SSID, velocidade WiFi e nível de bateria.
     
     Body:
     {
-        "tuya_device_id": "bf1234567890abcdef"
+        "tuya_device_id": "bf1234567890abcdef",
+        "wifi_ssid": "NomeDaRede" (opcional),
+        "wifi_speed": 65 (opcional, em Mbps),
+        "battery_level": 85 (opcional, 0-100)
     }
     """
     try:
@@ -968,8 +1087,18 @@ def api_tuya_heartbeat():
                 "error": "tuya_device_id é obrigatório"
             }), 400
         
-        # Atualizar heartbeat no banco
-        success = update_device_heartbeat(tuya_device_id)
+        # Extrair informações adicionais (opcionais)
+        wifi_ssid = data.get("wifi_ssid")
+        wifi_speed = data.get("wifi_speed")
+        battery_level = data.get("battery_level")
+        
+        # Atualizar heartbeat no banco (com informações adicionais)
+        success = update_device_heartbeat(
+            tuya_device_id,
+            wifi_ssid=wifi_ssid,
+            wifi_speed=wifi_speed,
+            battery_level=battery_level
+        )
         
         if success:
             return jsonify({
@@ -1213,7 +1342,45 @@ def api_sync_devices():
 def start_server(host="0.0.0.0", port=8000):
     """Inicia o servidor Flask"""
     log(f"[START] Servidor Tuya local rodando em http://{host}:{port} (SITE={SITE_NAME})")
+    log(f"[START] ⚠️ IMPORTANTE: Para aceitar conexões de outros dispositivos na rede:")
+    log(f"[START] - Servidor está escutando em 0.0.0.0 (todas as interfaces)")
+    log(f"[START] - Porta: {port}")
+    log(f"[START] - Outros dispositivos podem conectar usando o IP local deste dispositivo")
+    log(f"[START] - Exemplo: http://[IP_LOCAL]:{port}/tuya/command")
+    log(f"[START] ⚠️ Se não funcionar de outros dispositivos:")
+    log(f"[START] 1. Verifique se AP Isolation está DESATIVADO no roteador")
+    log(f"[START] 2. Verifique firewall do Android (alguns bloqueiam conexões de entrada)")
+    log(f"[START] 3. Certifique-se que ambos dispositivos estão na mesma rede WiFi")
+    log(f"[START] 4. Se firewall bloquear, tente usar porta diferente (8080, 8888, etc)")
     # Faz o scan inicial
     scan_and_print_devices()
-    app.run(host=host, port=port, debug=False, use_reloader=False)
+    # Usar threaded=True para aceitar múltiplas conexões simultâneas
+    # Usar use_reloader=False para evitar problemas no Android
+    try:
+        app.run(host=host, port=port, debug=False, use_reloader=False, threaded=True)
+    except OSError as e:
+        # Se porta estiver em uso ou bloqueada, tentar porta alternativa
+        if "Address already in use" in str(e) or "Permission denied" in str(e):
+            log(f"[START] Porta {port} bloqueada ou em uso, tentando portas alternativas...")
+            for alt_port in ALTERNATIVE_PORTS:
+                if alt_port == port:
+                    continue
+                try:
+                    log(f"[START] Tentando porta alternativa: {alt_port}")
+                    app.run(host=host, port=alt_port, debug=False, use_reloader=False, threaded=True)
+                    break
+                except Exception as alt_e:
+                    log(f"[START] Porta {alt_port} também falhou: {alt_e}")
+                    continue
+        else:
+            raise
+    except Exception as e:
+        log(f"[START] ERRO ao iniciar servidor: {e}")
+        log(f"[START] Tentando novamente com configurações alternativas...")
+        # Tentar novamente sem threaded (alguns Android podem não suportar)
+        try:
+            app.run(host=host, port=port, debug=False, use_reloader=False)
+        except Exception as e2:
+            log(f"[START] ERRO crítico ao iniciar servidor: {e2}")
+            raise
 
