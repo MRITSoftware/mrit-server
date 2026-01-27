@@ -40,6 +40,7 @@ class PythonServerService : Service() {
     private val HEALTH_CHECK_INTERVAL = 60000L // 1 minuto
     private val HEARTBEAT_MONITOR_INTERVAL = 20 * 60 * 1000L // 20 minutos - verificar se heartbeat executou
     private val HEARTBEAT_DIRECT_INTERVAL = 15 * 60 * 1000L // 15 minutos - heartbeat direto no serviço
+    private val HEARTBEAT_LOCAL_NETWORK_INTERVAL = 10 * 60 * 1000L // 10 minutos - heartbeat mais frequente quando na mesma rede
     private var localIpMonitor: LocalIpMonitorService? = null
     private var wasServerOnline = false // Rastrear estado anterior do servidor
     private var wakeLock: PowerManager.WakeLock? = null
@@ -548,8 +549,29 @@ class PythonServerService : Service() {
     }
     
     /**
-     * Executa heartbeat diretamente no serviço a cada 15 minutos
-     * Isso funciona como fallback caso o WorkManager não execute
+     * Verifica se está na mesma rede local (WiFi ou Ethernet conectado)
+     */
+    private fun isOnLocalNetwork(): Boolean {
+        return try {
+            val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val network = connectivityManager.activeNetwork
+            val capabilities = network?.let { connectivityManager.getNetworkCapabilities(it) }
+            
+            val hasWifi = capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+            val hasEthernet = capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true
+            
+            hasWifi || hasEthernet
+        } catch (e: Exception) {
+            Log.w(TAG, "Erro ao verificar rede local: ${e.message}")
+            false
+        }
+    }
+    
+    /**
+     * Executa heartbeat diretamente no serviço
+     * Quando na mesma rede: a cada 10 minutos (mais frequente)
+     * Quando não na mesma rede: a cada 15 minutos (padrão)
+     * Isso funciona como fallback caso o WorkManager e AlarmManager não executem
      */
     private fun startDirectHeartbeat() {
         heartbeatDirectJob?.cancel()
@@ -560,12 +582,23 @@ class PythonServerService : Service() {
             
             while (isActive) {
                 try {
-                    Log.d(TAG, "🔄 Heartbeat direto no serviço executando (fallback)...")
+                    val isLocalNetwork = isOnLocalNetwork()
+                    val interval = if (isLocalNetwork) {
+                        HEARTBEAT_LOCAL_NETWORK_INTERVAL
+                    } else {
+                        HEARTBEAT_DIRECT_INTERVAL
+                    }
+                    
+                    Log.d(TAG, "🔄 Heartbeat direto no serviço executando (fallback, rede local: $isLocalNetwork)...")
                     
                     // Verificar se servidor está rodando
                     if (checkServerHealth()) {
-                        // Executar heartbeat diretamente
-                        executeDirectHeartbeat()
+                        // Executar heartbeat diretamente com retry mais agressivo se na mesma rede
+                        if (isLocalNetwork) {
+                            executeDirectHeartbeatWithRetry(maxAttempts = 5) // Mais tentativas na mesma rede
+                        } else {
+                            executeDirectHeartbeat()
+                        }
                     } else {
                         Log.w(TAG, "Servidor não está respondendo, pulando heartbeat direto")
                     }
@@ -573,17 +606,50 @@ class PythonServerService : Service() {
                     Log.e(TAG, "Erro ao executar heartbeat direto: ${e.message}", e)
                 }
                 
-                delay(HEARTBEAT_DIRECT_INTERVAL)
+                // Usar intervalo dinâmico baseado na rede
+                val currentInterval = if (isOnLocalNetwork()) {
+                    HEARTBEAT_LOCAL_NETWORK_INTERVAL
+                } else {
+                    HEARTBEAT_DIRECT_INTERVAL
+                }
+                delay(currentInterval)
             }
         }
         
-        Log.d(TAG, "Heartbeat direto no serviço iniciado (executa a cada ${HEARTBEAT_DIRECT_INTERVAL / 1000 / 60} minutos)")
+        Log.d(TAG, "Heartbeat direto no serviço iniciado (intervalo dinâmico: 10min rede local, 15min padrão)")
+    }
+    
+    /**
+     * Executa heartbeat diretamente com retry agressivo (para mesma rede)
+     */
+    private suspend fun executeDirectHeartbeatWithRetry(maxAttempts: Int = 5) {
+        var attempts = 0
+        var success = false
+        
+        while (!success && attempts < maxAttempts) {
+            attempts++
+            Log.d(TAG, "Tentativa $attempts/$maxAttempts de heartbeat direto (rede local)...")
+            
+            success = executeDirectHeartbeat()
+            
+            if (!success && attempts < maxAttempts) {
+                val delayMs = (attempts * 2000).toLong() // Backoff: 2s, 4s, 6s, 8s
+                Log.w(TAG, "Falha na tentativa $attempts, aguardando ${delayMs}ms antes de tentar novamente...")
+                kotlinx.coroutines.delay(delayMs)
+            }
+        }
+        
+        if (success) {
+            Log.d(TAG, "✅ Heartbeat direto enviado com sucesso após $attempts tentativa(s)")
+        } else {
+            Log.e(TAG, "❌ Falha ao enviar heartbeat direto após $maxAttempts tentativas")
+        }
     }
     
     /**
      * Executa heartbeat diretamente (sem WorkManager)
      */
-    private suspend fun executeDirectHeartbeat() {
+    private suspend fun executeDirectHeartbeat(): Boolean {
         try {
             val prefs = getSharedPreferences("TuyaGateway", Context.MODE_PRIVATE)
             
@@ -642,9 +708,13 @@ class PythonServerService : Service() {
                             .putLong("last_heartbeat_time", System.currentTimeMillis())
                             .apply()
                         Log.d(TAG, "✅ Heartbeat direto enviado com sucesso para device $deviceId")
+                        connection.disconnect()
+                        return true
                     } else {
                         val error = json.optString("error", "Erro desconhecido")
                         Log.w(TAG, "Servidor retornou ok=false no heartbeat direto: $error")
+                        connection.disconnect()
+                        return false
                     }
                 } catch (e: Exception) {
                     // Se resposta não for JSON válido, mas código foi 200, considerar sucesso
@@ -653,14 +723,17 @@ class PythonServerService : Service() {
                         .putLong("last_heartbeat_time", System.currentTimeMillis())
                         .apply()
                     Log.d(TAG, "✅ Heartbeat direto enviado (resposta não-JSON, mas código 200)")
+                    connection.disconnect()
+                    return true
                 }
             } else {
                 Log.w(TAG, "Erro HTTP ao enviar heartbeat direto: $responseCode")
+                connection.disconnect()
+                return false
             }
-            
-            connection.disconnect()
         } catch (e: Exception) {
             Log.e(TAG, "Erro ao executar heartbeat direto: ${e.message}", e)
+            return false
         }
     }
     

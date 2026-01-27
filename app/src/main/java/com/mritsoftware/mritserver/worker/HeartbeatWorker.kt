@@ -99,20 +99,30 @@ class HeartbeatWorker(
                 return androidx.work.ListenableWorker.Result.success() // Não é erro, apenas não há device configurado
             }
             
+            // Verificar se está na mesma rede local (WiFi ou Ethernet)
+            val isLocalNetwork = checkLocalNetwork()
+            
             // Chamar endpoint de heartbeat com retry automático
+            // Se estiver na mesma rede, usar retry mais agressivo
             var success = false
             var attempts = 0
-            val maxAttempts = 3
+            val maxAttempts = if (isLocalNetwork) 5 else 3 // Mais tentativas na mesma rede
             
             while (!success && attempts < maxAttempts) {
                 attempts++
-                Log.d(TAG, "Tentando enviar heartbeat (tentativa $attempts/$maxAttempts)...")
+                Log.d(TAG, "Tentando enviar heartbeat (tentativa $attempts/$maxAttempts, rede local: $isLocalNetwork)...")
                 
                 success = sendHeartbeat(deviceId)
                 
                 if (!success && attempts < maxAttempts) {
-                    Log.w(TAG, "Falha ao enviar heartbeat, aguardando 5 segundos antes de tentar novamente...")
-                    delay(5000) // Aguardar 5 segundos entre tentativas
+                    // Backoff mais curto se na mesma rede (rede é confiável)
+                    val delayMs = if (isLocalNetwork) {
+                        2000L // 2 segundos na mesma rede
+                    } else {
+                        5000L // 5 segundos padrão
+                    }
+                    Log.w(TAG, "Falha ao enviar heartbeat, aguardando ${delayMs}ms antes de tentar novamente...")
+                    delay(delayMs)
                 }
             }
             
@@ -132,6 +142,25 @@ class HeartbeatWorker(
         } catch (e: Exception) {
             Log.e(TAG, "Erro ao executar heartbeat: ${e.message}", e)
             androidx.work.ListenableWorker.Result.retry()
+        }
+    }
+    
+    /**
+     * Verifica se está na mesma rede local (WiFi ou Ethernet conectado)
+     */
+    private fun checkLocalNetwork(): Boolean {
+        return try {
+            val connectivityManager = applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
+            val network = connectivityManager?.activeNetwork
+            val capabilities = network?.let { connectivityManager.getNetworkCapabilities(it) }
+            
+            val hasWifi = capabilities?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) == true
+            val hasEthernet = capabilities?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET) == true
+            
+            hasWifi || hasEthernet
+        } catch (e: Exception) {
+            Log.w(TAG, "Erro ao verificar rede local: ${e.message}")
+            false
         }
     }
     
