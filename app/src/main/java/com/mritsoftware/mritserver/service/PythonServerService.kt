@@ -670,7 +670,7 @@ class PythonServerService : Service() {
             
             if (deviceId.isNullOrEmpty()) {
                 Log.w(TAG, "Device ID não encontrado, pulando heartbeat direto")
-                return
+                return false
             }
             
             // Enviar heartbeat diretamente
