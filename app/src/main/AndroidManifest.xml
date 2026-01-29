@@ -112,15 +112,6 @@
                 <action android:name="android.net.conn.CONNECTIVITY_CHANGE" />
             </intent-filter>
         </receiver>
-        
-        <receiver
-            android:name=".receiver.AlarmManagerHeartbeatReceiver"
-            android:enabled="true"
-            android:exported="false">
-            <intent-filter>
-                <action android:name="com.mritsoftware.mritserver.HEARTBEAT_ALARM" />
-            </intent-filter>
-        </receiver>
     </application>
 
 </manifest>

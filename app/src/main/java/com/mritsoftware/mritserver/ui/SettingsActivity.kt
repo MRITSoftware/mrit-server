@@ -46,12 +46,7 @@ class SettingsActivity : AppCompatActivity() {
     private fun loadInfo() {
         // Carregar IP local
         val localIp = getLocalIpAddress()
-        val ipText = if (localIp != null) {
-            "$localIp:8000\n\n💡 Para acessar de outros dispositivos na mesma rede:\nhttp://$localIp:8000/tuya/command"
-        } else {
-            "Não disponível\n\n⚠️ Verifique se WiFi está conectado"
-        }
-        localIpText.setText(ipText)
+        localIpText.setText(localIp ?: "Não disponível")
         
         // Carregar nome da unidade
         val prefs = getSharedPreferences("TuyaGateway", MODE_PRIVATE)

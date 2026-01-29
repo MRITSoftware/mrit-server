@@ -6,9 +6,26 @@ import traceback
 import threading
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone
+from urllib.parse import urlencode
 
 from flask import Flask, request, jsonify
 import tinytuya
+
+# =========================
+# LOGGING (definido primeiro)
+# =========================
+
+def log(msg: str) -> None:
+    """Função de log centralizada."""
+    print(msg, flush=True)
+
+def mask_local_key(local_key: Optional[str], visible_chars: int = 8) -> str:
+    """Mascara local_key mostrando apenas os primeiros caracteres."""
+    if not local_key:
+        return "None"
+    if len(local_key) <= visible_chars:
+        return "*" * len(local_key)
+    return local_key[:visible_chars] + "*" * (len(local_key) - visible_chars)
 
 # Usar requests para chamadas HTTP diretas ao Supabase
 # Isso evita dependências problemáticas como pydantic-core
@@ -17,8 +34,7 @@ try:
     REQUESTS_AVAILABLE = True
 except ImportError:
     REQUESTS_AVAILABLE = False
-    # log será definido depois, então apenas print aqui
-    print("[WARN] requests não disponível - funcionalidades de banco desabilitadas")
+    log("[WARN] requests não disponível - funcionalidades de banco desabilitadas")
 
 # Tuya Connector para buscar local_key da API Tuya
 try:
@@ -26,7 +42,7 @@ try:
     TUYA_CONNECTOR_AVAILABLE = True
 except ImportError:
     TUYA_CONNECTOR_AVAILABLE = False
-    print("[WARN] tuya-connector-python não disponível - busca de local_key desabilitada")
+    log("[WARN] tuya-connector-python não disponível - busca de local_key desabilitada")
 
 # =========================
 # CONFIG & AUTO-SETUP
@@ -41,6 +57,37 @@ except ImportError:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+DEVICES_CACHE_PATH = os.path.join(BASE_DIR, "devices_cache.json")
+
+def load_config_from_env() -> Dict[str, Any]:
+    """Carrega configurações de variáveis de ambiente."""
+    config = {}
+    
+    # Supabase
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_anon_key = os.getenv("SUPABASE_ANON_KEY")
+    if supabase_url and supabase_anon_key:
+        config["supabase"] = {
+            "url": supabase_url,
+            "anon_key": supabase_anon_key
+        }
+    
+    # Admin token
+    admin_token = os.getenv("ADMIN_TOKEN")
+    if admin_token:
+        config["admin_token"] = admin_token
+    
+    # Tuya accounts (JSON string)
+    tuya_accounts_json = os.getenv("TUYA_ACCOUNTS")
+    if tuya_accounts_json:
+        try:
+            accounts = json.loads(tuya_accounts_json)
+            if isinstance(accounts, list):
+                config["tuya_accounts"] = accounts
+        except json.JSONDecodeError:
+            log("[WARN] TUYA_ACCOUNTS inválido, ignorando")
+    
+    return config
 
 def create_config_if_needed():
     """Cria o config.json com nome do site/tablet."""
@@ -60,7 +107,7 @@ def create_config_if_needed():
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=4, ensure_ascii=False)
         
-        print(f"[OK] config.json criado com site_name = {site}")
+        log(f"[OK] config.json criado com site_name = {site}")
 
 def update_site_name(new_name: str):
     """Atualiza o nome do site no config.json"""
@@ -78,7 +125,7 @@ def update_site_name(new_name: str):
     
     global SITE_NAME
     SITE_NAME = new_name
-    print(f"[OK] site_name atualizado para = {new_name}")
+    log(f"[OK] site_name atualizado para = {new_name}")
 
 def update_supabase_config(url: str, anon_key: str):
     """Atualiza a configuração do Supabase no config.json"""
@@ -131,10 +178,55 @@ if os.path.exists(CONFIG_PATH):
     SITE_NAME: str = cfg.get("site_name", "SITE_DESCONHECIDO")
     SUPABASE_CONFIG = cfg.get("supabase", {})
     TUYA_ACCOUNTS = cfg.get("tuya_accounts", [])
+    ADMIN_TOKEN = cfg.get("admin_token", "")
 else:
     SITE_NAME = "SITE_DESCONHECIDO"
     SUPABASE_CONFIG = {}
     TUYA_ACCOUNTS = []
+    ADMIN_TOKEN = ""
+
+# Carregar de variáveis de ambiente e preencher config se vazio
+env_config = load_config_from_env()
+
+# Se env var existir e config estiver vazio, preencher automaticamente
+if not SUPABASE_CONFIG.get("url") and env_config.get("supabase"):
+    SUPABASE_CONFIG = env_config["supabase"]
+    # Salvar no config.json
+    if os.path.exists(CONFIG_PATH):
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    else:
+        cfg = {}
+    cfg["supabase"] = SUPABASE_CONFIG
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=4, ensure_ascii=False)
+    log("[INFO] Supabase configurado automaticamente a partir de variáveis de ambiente")
+
+if not TUYA_ACCOUNTS and env_config.get("tuya_accounts"):
+    TUYA_ACCOUNTS = env_config["tuya_accounts"]
+    # Salvar no config.json
+    if os.path.exists(CONFIG_PATH):
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    else:
+        cfg = {}
+    cfg["tuya_accounts"] = TUYA_ACCOUNTS
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=4, ensure_ascii=False)
+    log(f"[INFO] Contas Tuya configuradas automaticamente a partir de variáveis de ambiente: {len(TUYA_ACCOUNTS)} conta(s)")
+
+if not ADMIN_TOKEN and env_config.get("admin_token"):
+    ADMIN_TOKEN = env_config["admin_token"]
+    # Salvar no config.json
+    if os.path.exists(CONFIG_PATH):
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    else:
+        cfg = {}
+    cfg["admin_token"] = ADMIN_TOKEN
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=4, ensure_ascii=False)
+    log("[INFO] Admin token configurado automaticamente a partir de variáveis de ambiente")
 
 # Garantir que SUPABASE_CONFIG tem a estrutura correta
 if not isinstance(SUPABASE_CONFIG, dict):
@@ -144,135 +236,14 @@ if not isinstance(SUPABASE_CONFIG, dict):
 if not isinstance(TUYA_ACCOUNTS, list):
     TUYA_ACCOUNTS = []
 
-# Configurar Supabase automaticamente se as credenciais padrão estiverem disponíveis
-# (pode ser configurado via variáveis de ambiente ou hardcoded para desenvolvimento)
-DEFAULT_SUPABASE_URL = "https://kihyhoqbrkwbfudttevo.supabase.co"
-DEFAULT_SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtpaHlob3Ficmt3YmZ1ZHR0ZXZvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MTU1NTUwMjcsImV4cCI6MjAzMTEzMTAyN30.XtBTlSiqhsuUIKmhAMEyxofV-dRst7240n912m4O4Us"
-
-# Definir função log antes de usar
-def log(msg: str) -> None:
-    print(msg, flush=True)
-
-# Se não há configuração, usar as credenciais padrão
+# Se ainda não há configuração, logar aviso mas não usar valores hardcoded
 if not SUPABASE_CONFIG.get("url") or not SUPABASE_CONFIG.get("anon_key"):
-    try:
-        update_supabase_config(DEFAULT_SUPABASE_URL, DEFAULT_SUPABASE_ANON_KEY)
-        log(f"[INFO] Supabase configurado automaticamente: URL={DEFAULT_SUPABASE_URL}")
-    except Exception as e:
-        log(f"[WARN] Não foi possível configurar Supabase automaticamente: {e}")
+    log("[WARN] Configuração do Supabase não encontrada. Configure via /config/supabase ou variáveis de ambiente.")
 
-# Configurar contas Tuya padrão se não houver configuração
-# As credenciais podem ser configuradas via endpoint /config/tuya ou diretamente no config.json
-DEFAULT_TUYA_ACCOUNTS = [
-    {
-        "access_id": "td7tp3cvq3nrc35emwg3",
-        "access_key": "bbcdaa3dfe9545fca4326fcfa1cf3e2c",
-        "endpoint": "https://openapi.tuyaus.com",
-        "uid": "az1715569264750N2mUr"
-    },
-    {
-        "access_id": "wwxsqj37wnfdnp98wu54",
-        "access_key": "d7a140221f3b4e8f916601af4fbd6816",
-        "endpoint": "https://openapi.tuyaus.com",
-        "uid": "az1759235287550HcJRz"
-    }
-]
-
-def fetch_tuya_accounts_from_database() -> List[Dict[str, Any]]:
-    """
-    Busca contas Tuya da tabela contas_tuya no Supabase.
-    Retorna apenas contas com enabled=true.
-    """
-    if not REQUESTS_AVAILABLE:
-        log("[DB] requests não está disponível para buscar contas Tuya")
-        return []
-    
-    if not SUPABASE_CONFIG.get("url") or not SUPABASE_CONFIG.get("anon_key"):
-        log("[DB] Configuração do Supabase não encontrada para buscar contas Tuya")
-        return []
-    
-    try:
-        base_url = get_supabase_url()
-        headers = get_supabase_headers()
-        
-        # Buscar contas Tuya com enabled=true
-        url = f"{base_url}/contas_tuya?enabled=eq.true&select=access_id,access_key,endpoint,uid,label"
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-        
-        accounts = response.json()
-        
-        if not accounts:
-            log("[DB] Nenhuma conta Tuya habilitada encontrada no banco")
-            return []
-        
-        # Converter para formato esperado (remover campos extras como 'label')
-        formatted_accounts = []
-        for account in accounts:
-            formatted_accounts.append({
-                "access_id": account.get("access_id"),
-                "access_key": account.get("access_key"),
-                "endpoint": account.get("endpoint"),
-                "uid": account.get("uid")
-            })
-        
-        log(f"[DB] {len(formatted_accounts)} conta(s) Tuya encontrada(s) no banco")
-        return formatted_accounts
-        
-    except requests.exceptions.HTTPError as e:
-        log(f"[DB] Erro HTTP ao buscar contas Tuya: {e}")
-        if hasattr(e, 'response') and e.response is not None:
-            log(f"[DB] Response: {e.response.text}")
-        return []
-    except Exception as e:
-        log(f"[DB] Erro ao buscar contas Tuya do banco: {e}")
-        traceback.print_exc()
-        return []
-
-def sync_tuya_accounts_from_database():
-    """
-    Sincroniza contas Tuya do banco de dados e salva localmente.
-    Só atualiza se não houver contas locais ou se forçado.
-    """
-    # Se já há contas locais, não atualizar (evita sobrescrever configuração manual)
-    if TUYA_ACCOUNTS:
-        log("[SYNC] Contas Tuya já existem localmente, pulando sincronização do banco")
-        return False
-    
-    log("[SYNC] Buscando contas Tuya do banco de dados...")
-    accounts = fetch_tuya_accounts_from_database()
-    
-    if accounts:
-        try:
-            update_tuya_accounts(accounts)
-            log(f"[SYNC] ✅ {len(accounts)} conta(s) Tuya sincronizada(s) do banco e salva(s) localmente")
-            return True
-        except Exception as e:
-            log(f"[SYNC] ❌ Erro ao salvar contas Tuya: {e}")
-            return False
-    else:
-        # Se não encontrou no banco, usar contas padrão como fallback
-        log("[SYNC] Nenhuma conta encontrada no banco, usando contas padrão como fallback")
-        try:
-            update_tuya_accounts(DEFAULT_TUYA_ACCOUNTS)
-            log(f"[SYNC] Contas Tuya padrão configuradas: {len(DEFAULT_TUYA_ACCOUNTS)} conta(s)")
-            return True
-        except Exception as e:
-            log(f"[SYNC] Erro ao configurar contas padrão: {e}")
-            return False
-
-# Tentar sincronizar contas do banco na inicialização (se não houver contas locais)
 if not TUYA_ACCOUNTS:
-    sync_tuya_accounts_from_database()
-elif not TUYA_ACCOUNTS:
-    # Fallback: usar contas padrão se sincronização falhou
-    try:
-        update_tuya_accounts(DEFAULT_TUYA_ACCOUNTS)
-        log(f"[INFO] Contas Tuya configuradas automaticamente: {len(DEFAULT_TUYA_ACCOUNTS)} conta(s)")
-    except Exception as e:
-        log(f"[WARN] Não foi possível configurar contas Tuya automaticamente: {e}")
+    log("[WARN] Nenhuma conta Tuya configurada. Configure via /config/tuya ou variáveis de ambiente.")
 
-print(f"[INFO] Servidor local iniciado para SITE = {SITE_NAME}")
+log(f"[INFO] Servidor local iniciado para SITE = {SITE_NAME}")
 
 # =========================
 # DATABASE (SUPABASE)
@@ -321,13 +292,17 @@ def get_devices_from_db(tuya_device_ids: List[str]) -> Dict[str, Dict]:
         base_url = get_supabase_url()
         headers = get_supabase_headers()
         
-        # Construir query para buscar múltiplos tuya_device_id
+        # Usar requests com params para URL encoding correto
         # Supabase PostgREST usa formato: tuya_device_id=in.(id1,id2,id3)
-        # URL encode os IDs para evitar problemas com caracteres especiais
-        ids_param = ",".join(tuya_device_ids)
-        url = f"{base_url}/tuya_devices?tuya_device_id=in.({ids_param})&select=*"
+        # Construir a query string corretamente com URL encoding
+        ids_list = ",".join(tuya_device_ids)
+        params = {
+            "tuya_device_id": f"in.({ids_list})",
+            "select": "*"
+        }
         
-        response = requests.get(url, headers=headers, timeout=10)
+        url = f"{base_url}/tuya_devices"
+        response = requests.get(url, headers=headers, params=params, timeout=10)
         response.raise_for_status()
         
         data = response.json()
@@ -426,22 +401,65 @@ def create_device_in_db(
         traceback.print_exc()
         return False
 
-def update_device_heartbeat(
-    tuya_device_id: str,
-    wifi_ssid: Optional[str] = None,
-    wifi_speed: Optional[int] = None,
-    battery_level: Optional[int] = None
-) -> bool:
+def tuya_status_with_timeout(device: Any, timeout_seconds: int = 10) -> Optional[Dict]:
+    """Executa status() com timeout para evitar travamentos."""
+    result = [None]
+    exception = [None]
+    
+    def status_thread():
+        try:
+            result[0] = device.status()
+        except Exception as e:
+            exception[0] = e
+    
+    thread = threading.Thread(target=status_thread, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout_seconds)
+    
+    if thread.is_alive():
+        log(f"[TUYA] Timeout após {timeout_seconds} segundos em status()")
+        return None
+    
+    if exception[0]:
+        log(f"[TUYA] Exceção durante status(): {exception[0]}")
+        return None
+    
+    return result[0]
+
+def tuya_command_with_timeout(device: Any, action: str, timeout_seconds: int = 10) -> Optional[Dict]:
+    """Executa turn_on() ou turn_off() com timeout para evitar travamentos."""
+    result = [None]
+    exception = [None]
+    
+    def command_thread():
+        try:
+            if action == "on":
+                result[0] = device.turn_on()
+            elif action == "off":
+                result[0] = device.turn_off()
+            else:
+                exception[0] = ValueError(f"Ação inválida: {action}")
+        except Exception as e:
+            exception[0] = e
+    
+    thread = threading.Thread(target=command_thread, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout_seconds)
+    
+    if thread.is_alive():
+        log(f"[TUYA] Timeout após {timeout_seconds} segundos em {action}()")
+        return None
+    
+    if exception[0]:
+        log(f"[TUYA] Exceção durante {action}(): {exception[0]}")
+        raise exception[0]
+    
+    return result[0]
+
+def update_device_heartbeat(tuya_device_id: str) -> bool:
     """
     Atualiza o campo servidor_online de um device (heartbeat/ping).
     Primeiro tenta fazer ping na placa física, depois atualiza o banco.
-    Também atualiza informações adicionais: SSID, velocidade WiFi e nível de bateria.
-    
-    Args:
-        tuya_device_id: ID do dispositivo Tuya
-        wifi_ssid: Nome da rede WiFi (opcional)
-        wifi_speed: Velocidade do link WiFi em Mbps (opcional)
-        battery_level: Nível de bateria 0-100 (opcional)
     """
     if not REQUESTS_AVAILABLE:
         log("[DB] requests não está disponível")
@@ -483,17 +501,27 @@ def update_device_heartbeat(
                 d = tinytuya.OutletDevice(tuya_device_id, lan_ip, local_key)
                 d.set_version(version)
                 
-                # Consultar status do dispositivo (não altera o estado, apenas verifica conexão)
-                status = d.status()
+                # Consultar status do dispositivo com timeout (não altera o estado, apenas verifica conexão)
+                status = tuya_status_with_timeout(d, timeout_seconds=10)
                 
                 if status:
                     device_online = True
                     log(f"[HEARTBEAT] Placa respondeu ao ping: {status}")
                 else:
-                    log(f"[HEARTBEAT] Placa não respondeu ao ping")
+                    log(f"[HEARTBEAT] Placa não respondeu ao ping (timeout ou erro)")
+                    # Limpar cache se houver timeout
+                    with DEVICE_CACHE_LOCK:
+                        if tuya_device_id in DEVICE_CACHE:
+                            log(f"[HEARTBEAT] Limpando cache de IP para {tuya_device_id} devido a timeout")
+                            del DEVICE_CACHE[tuya_device_id]
                     
             except Exception as e:
                 log(f"[HEARTBEAT] Erro ao fazer ping na placa {tuya_device_id}: {e}")
+                # Limpar cache se houver erro
+                with DEVICE_CACHE_LOCK:
+                    if tuya_device_id in DEVICE_CACHE:
+                        log(f"[HEARTBEAT] Limpando cache de IP para {tuya_device_id} devido a erro")
+                        del DEVICE_CACHE[tuya_device_id]
                 # Continuar mesmo se ping falhar - atualizar banco de qualquer forma
                 # para indicar que o servidor tentou se comunicar
         else:
@@ -510,26 +538,10 @@ def update_device_heartbeat(
         # Atualizar usando Supabase REST API
         url = f"{base_url}/tuya_devices?tuya_device_id=eq.{tuya_device_id}"
         
-        # Atualizar servidor_online e informações adicionais
+        # Atualizar apenas o campo servidor_online com timestamp atual
         update_data = {"servidor_online": timestamp_iso}
         
-        # Adicionar informações adicionais se fornecidas
-        if wifi_ssid is not None:
-            update_data["wifi_ssid"] = wifi_ssid
-        if wifi_speed is not None:
-            update_data["wifi_speed"] = wifi_speed
-        if battery_level is not None:
-            update_data["battery_level"] = battery_level
-        
-        info_str = f"timestamp: {timestamp_iso}, placa online: {device_online}"
-        if wifi_ssid:
-            info_str += f", SSID: {wifi_ssid}"
-        if wifi_speed:
-            info_str += f", Velocidade: {wifi_speed} Mbps"
-        if battery_level is not None:
-            info_str += f", Bateria: {battery_level}%"
-        
-        log(f"[HEARTBEAT] Atualizando servidor_online para device {tuya_device_id} ({info_str})")
+        log(f"[HEARTBEAT] Atualizando servidor_online para device {tuya_device_id} (timestamp: {timestamp_iso}, placa online: {device_online})")
         
         # Usar PATCH com Prefer: return=minimal para não retornar dados
         headers_with_prefer = {**headers, "Prefer": "return=minimal,resolution=merge-duplicates"}
@@ -640,10 +652,152 @@ def update_device_in_db(
         return False
 
 # =========================
+# CACHE PERSISTENTE DE DISPOSITIVOS
+# =========================
+
+def load_devices_cache() -> Dict[str, Dict[str, Any]]:
+    """
+    Carrega cache persistente de dispositivos do arquivo JSON.
+    Retorna dict onde chave é tuya_device_id e valor é dict com dados do dispositivo.
+    Filtra campos internos (que começam com "_").
+    """
+    if not os.path.exists(DEVICES_CACHE_PATH):
+        return {}
+    
+    try:
+        with open(DEVICES_CACHE_PATH, "r", encoding="utf-8") as f:
+            cache = json.load(f)
+        
+        if not isinstance(cache, dict):
+            return {}
+        
+        # Filtrar campos internos (que começam com "_")
+        device_cache = {k: v for k, v in cache.items() if not k.startswith("_")}
+        
+        log(f"[CACHE] Cache carregado: {len(device_cache)} dispositivo(s)")
+        return device_cache
+    except Exception as e:
+        log(f"[CACHE] Erro ao carregar cache: {e}")
+        return {}
+
+def save_device_to_cache(
+    tuya_device_id: str,
+    local_key: Optional[str] = None,
+    lan_ip: Optional[str] = None,
+    version: Optional[float] = None,
+    device_name: Optional[str] = None
+) -> None:
+    """
+    Salva ou atualiza um dispositivo no cache persistente.
+    Preserva campos internos (que começam com "_").
+    """
+    try:
+        # Carregar cache completo (incluindo campos internos)
+        if os.path.exists(DEVICES_CACHE_PATH):
+            with open(DEVICES_CACHE_PATH, "r", encoding="utf-8") as f:
+                cache = json.load(f)
+        else:
+            cache = {}
+        
+        if not isinstance(cache, dict):
+            cache = {}
+        
+        # Criar ou atualizar entrada do dispositivo
+        if tuya_device_id not in cache:
+            cache[tuya_device_id] = {}
+        
+        device_data = cache[tuya_device_id]
+        
+        # Atualizar apenas campos fornecidos (não sobrescrever com None)
+        if local_key is not None:
+            device_data["local_key"] = local_key
+        if lan_ip is not None:
+            device_data["lan_ip"] = lan_ip
+        if version is not None:
+            device_data["version"] = float(version)
+        if device_name is not None:
+            device_data["device_name"] = device_name
+        
+        # Salvar cache atualizado (preservando campos internos)
+        with open(DEVICES_CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump(cache, f, indent=4, ensure_ascii=False)
+        
+        log(f"[CACHE] Device {tuya_device_id} salvo no cache persistente")
+    except Exception as e:
+        log(f"[CACHE] Erro ao salvar device no cache: {e}")
+        traceback.print_exc()
+
+def get_device_from_cache(tuya_device_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Busca um dispositivo no cache persistente.
+    Retorna dict com dados do dispositivo ou None se não encontrado.
+    """
+    cache = load_devices_cache()
+    return cache.get(tuya_device_id)
+
+def get_last_active_device() -> Optional[str]:
+    """
+    Retorna o ID do último dispositivo ativo (último usado com sucesso).
+    """
+    try:
+        if not os.path.exists(DEVICES_CACHE_PATH):
+            return None
+        
+        with open(DEVICES_CACHE_PATH, "r", encoding="utf-8") as f:
+            cache = json.load(f)
+        
+        if not isinstance(cache, dict):
+            return None
+        
+        # Buscar campo _last_active_device_id
+        last_active = cache.get("_last_active_device_id")
+        if last_active and last_active in cache and not last_active.startswith("_"):
+            return last_active
+        
+        # Se não tiver último ativo, mas tiver apenas um dispositivo, usar ele
+        device_ids = [k for k in cache.keys() if not k.startswith("_")]
+        if len(device_ids) == 1:
+            return device_ids[0]
+        
+        return None
+    except Exception as e:
+        log(f"[CACHE] Erro ao buscar último dispositivo ativo: {e}")
+        return None
+
+def set_last_active_device(tuya_device_id: str) -> None:
+    """
+    Salva o ID do último dispositivo ativo no cache.
+    """
+    try:
+        # Carregar cache completo (incluindo campos internos)
+        if os.path.exists(DEVICES_CACHE_PATH):
+            with open(DEVICES_CACHE_PATH, "r", encoding="utf-8") as f:
+                cache = json.load(f)
+        else:
+            cache = {}
+        
+        if not isinstance(cache, dict):
+            cache = {}
+        
+        cache["_last_active_device_id"] = tuya_device_id
+        
+        with open(DEVICES_CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump(cache, f, indent=4, ensure_ascii=False)
+        
+        log(f"[CACHE] Último dispositivo ativo salvo: {tuya_device_id}")
+    except Exception as e:
+        log(f"[CACHE] Erro ao salvar último dispositivo ativo: {e}")
+
+# Carregar cache na inicialização
+DEVICES_CACHE = load_devices_cache()
+log(f"[CACHE] Cache inicializado com {len(DEVICES_CACHE)} dispositivo(s)")
+
+# =========================
 # DISCOVERY / CACHE DE IP
 # =========================
 
 DEVICE_CACHE: Dict[str, str] = {}
+DEVICE_CACHE_LOCK = threading.Lock()
 
 def scan_and_print_devices() -> None:
     """Faz um scan na rede e imprime todos os dispositivos Tuya encontrados."""
@@ -745,11 +899,12 @@ def discover_tuya_ip(tuya_device_id: str) -> Optional[str]:
     Tenta descobrir o IP LAN de um dispositivo Tuya pelo gwId (device_id),
     usando tinytuya.deviceScan() e guarda em cache.
     """
-    # se já descobrimos antes, usa o cache
-    if tuya_device_id in DEVICE_CACHE:
-        ip_cached = DEVICE_CACHE[tuya_device_id]
-        log(f"[DISCOVER] Usando IP em cache para {tuya_device_id}: {ip_cached}")
-        return ip_cached
+    # se já descobrimos antes, usa o cache (com lock)
+    with DEVICE_CACHE_LOCK:
+        if tuya_device_id in DEVICE_CACHE:
+            ip_cached = DEVICE_CACHE[tuya_device_id]
+            log(f"[DISCOVER] Usando IP em cache para {tuya_device_id}: {ip_cached}")
+            return ip_cached
     
     log(f"[DISCOVER] Varrendo a rede para encontrar o device_id = {tuya_device_id} ...")
     
@@ -773,7 +928,8 @@ def discover_tuya_ip(tuya_device_id: str) -> Optional[str]:
             log(f"[DISCOVER] Achado gwId={gwid} ip={dev_ip}")
             if gwid == tuya_device_id:
                 log(f"[DISCOVER] Encontrado! device_id={gwid} ip={dev_ip}")
-                DEVICE_CACHE[tuya_device_id] = dev_ip
+                with DEVICE_CACHE_LOCK:
+                    DEVICE_CACHE[tuya_device_id] = dev_ip
                 return dev_ip
         
         log(f"[DISCOVER] Nenhum dispositivo encontrado com device_id = {tuya_device_id}")
@@ -813,31 +969,42 @@ def send_tuya_command(
     if lan_ip.startswith("http://") or lan_ip.startswith("https://"):
         raise RuntimeError("lan_ip deve ser apenas o IP (ex: 192.168.0.50), sem http:// e sem porta.")
     
-    # Se não veio version ou veio vazio, usa 3.3 como padrão
-    if version is None or version == "":
+    # Normalizar version: usar version or 3.3 e garantir float
+    if version is None:
         version = 3.3
+    else:
+        try:
+            version = float(version)
+        except (ValueError, TypeError):
+            version = 3.3
     
     log(f"[INFO] [{SITE_NAME}] Enviando '{action}' → {tuya_device_id} @ {lan_ip} (versão {version})")
+    log(f"[INFO] local_key: {mask_local_key(local_key)}")
     
     try:
         d = tinytuya.OutletDevice(tuya_device_id, lan_ip, local_key)
         
-        # Usa a versão recebida do JSON ou 3.3 como padrão
+        # Usa a versão normalizada
         d.set_version(version)
         
-        if action == "on":
-            resp = d.turn_on()
-        elif action == "off":
-            resp = d.turn_off()
-        else:
-            raise ValueError(f"Ação inválida: {action}")
+        # Usar função com timeout
+        resp = tuya_command_with_timeout(d, action, timeout_seconds=10)
+        
+        if resp is None:
+            # Timeout - limpar cache
+            with DEVICE_CACHE_LOCK:
+                if tuya_device_id in DEVICE_CACHE:
+                    log(f"[INFO] Limpando cache de IP para {tuya_device_id} devido a timeout")
+                    del DEVICE_CACHE[tuya_device_id]
+            raise RuntimeError("Timeout ao enviar comando para dispositivo")
         
         log(f"[DEBUG] Resposta do dispositivo: {resp}")
     except Exception as e:
         # Limpar cache se houver erro de conexão
-        if tuya_device_id in DEVICE_CACHE:
-            log(f"[INFO] Limpando cache de IP para {tuya_device_id} devido a erro")
-            del DEVICE_CACHE[tuya_device_id]
+        with DEVICE_CACHE_LOCK:
+            if tuya_device_id in DEVICE_CACHE:
+                log(f"[INFO] Limpando cache de IP para {tuya_device_id} devido a erro")
+                del DEVICE_CACHE[tuya_device_id]
         raise RuntimeError(f"Erro ao enviar comando para dispositivo: {e}")
 
 # =========================
@@ -846,12 +1013,22 @@ def send_tuya_command(
 
 app = Flask(__name__)
 
-# Lista de portas alternativas para tentar se porta padrão falhar
-ALTERNATIVE_PORTS = [8000, 8080, 8888, 3000, 5000, 9000]
-
-# Fila de comandos pendentes para polling reverso (funciona mesmo com firewall/AP Isolation)
-# Estrutura: {tuya_device_id: [comando1, comando2, ...]}
-PENDING_COMMANDS_QUEUE: Dict[str, List[Dict[str, Any]]] = {}
+def validate_admin_token() -> bool:
+    """Valida o token de admin do header X-ADMIN-TOKEN."""
+    admin_token_header = request.headers.get("X-ADMIN-TOKEN", "")
+    
+    # Obter token do config ou env
+    expected_token = ADMIN_TOKEN or os.getenv("ADMIN_TOKEN", "")
+    
+    if not expected_token:
+        log("[AUTH] Admin token não configurado")
+        return False
+    
+    if admin_token_header != expected_token:
+        log(f"[AUTH] Token inválido (recebido: {mask_local_key(admin_token_header, 4)})")
+        return False
+    
+    return True
 
 @app.route("/health", methods=["GET"])
 def health():
@@ -861,6 +1038,7 @@ def health():
 def api_config_tuya():
     """
     Configura as contas Tuya para buscar local_key.
+    Requer header X-ADMIN-TOKEN.
     Body:
     {
         "accounts": [
@@ -874,8 +1052,15 @@ def api_config_tuya():
         ]
     }
     """
+    # Validar token de admin
+    if not validate_admin_token():
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    
     try:
-        data = request.get_json(silent=True) or {}
+        data = request.get_json(silent=True)
+        if data is None:
+            return jsonify({"ok": False, "error": "JSON inválido"}), 400
+        
         accounts = data.get("accounts", [])
         
         if not accounts:
@@ -901,54 +1086,11 @@ def api_config_tuya():
         traceback.print_exc()
         return jsonify({"ok": False, "error": err}), 500
 
-@app.route("/config/tuya/sync", methods=["POST"])
-def api_sync_tuya_accounts():
-    """
-    Sincroniza contas Tuya do banco de dados (tabela contas_tuya) e salva localmente.
-    Força atualização mesmo se já houver contas locais.
-    
-    Body opcional:
-    {
-        "force": true  // Se true, força atualização mesmo se já houver contas locais
-    }
-    """
-    try:
-        data = request.get_json(silent=True) or {}
-        force = data.get("force", False)
-        
-        # Se force=true, limpar contas locais antes de sincronizar
-        if force:
-            global TUYA_ACCOUNTS
-            TUYA_ACCOUNTS = []
-            log("[SYNC] Forçando sincronização de contas Tuya do banco...")
-        
-        # Buscar contas do banco
-        accounts = fetch_tuya_accounts_from_database()
-        
-        if accounts:
-            update_tuya_accounts(accounts)
-            return jsonify({
-                "ok": True,
-                "message": f"{len(accounts)} conta(s) Tuya sincronizada(s) do banco",
-                "accounts_count": len(accounts)
-            }), 200
-        else:
-            # Se não encontrou no banco, retornar erro (não usar fallback padrão via API)
-            return jsonify({
-                "ok": False,
-                "error": "Nenhuma conta Tuya habilitada encontrada no banco de dados"
-            }), 404
-        
-    except Exception as e:
-        err = str(e)
-        log(f"[ERRO] API /config/tuya/sync: {err}")
-        traceback.print_exc()
-        return jsonify({"ok": False, "error": err}), 500
-
 @app.route("/config/supabase", methods=["POST"])
 def api_config_supabase():
     """
     Configura as credenciais do Supabase.
+    Requer header X-ADMIN-TOKEN.
     
     Body:
     {
@@ -956,8 +1098,15 @@ def api_config_supabase():
         "anon_key": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
     }
     """
+    # Validar token de admin
+    if not validate_admin_token():
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    
     try:
-        data = request.get_json(force=True, silent=False) or {}
+        data = request.get_json(silent=True)
+        if data is None:
+            return jsonify({"ok": False, "error": "JSON inválido"}), 400
+        
         url = data.get("url")
         anon_key = data.get("anon_key")
         
@@ -980,6 +1129,186 @@ def api_config_supabase():
         traceback.print_exc()
         return jsonify({"ok": False, "error": err}), 500
 
+def normalize_version(version: Any) -> Optional[float]:
+    """
+    Normaliza version para float quando possível.
+    Aceita None/"" como None.
+    Se inválido, retorna None.
+    """
+    if version is None or version == "":
+        return None
+    
+    try:
+        return float(version)
+    except (ValueError, TypeError):
+        return None
+
+@app.route("/tuya/command", methods=["POST"])
+def api_tuya_command():
+    try:
+        data: Dict[str, Any] = request.get_json(silent=True)
+        if data is None:
+            return jsonify({"ok": False, "error": "JSON inválido"}), 400
+        
+        action = data.get("action")
+        tuya_device_id = data.get("tuya_device_id")
+        local_key = data.get("local_key")
+        lan_ip = data.get("lan_ip")  # pode vir None, vazio ou "auto"
+        version = data.get("version")  # pode vir None, vazio ou um número (ex: 3.3, 3.4)
+        
+        if action not in ("on", "off"):
+            return jsonify({"ok": False, "error": "action deve ser 'on' ou 'off'"}), 400
+        
+        # Se não enviou device_id, usar o último dispositivo ativo ou único no cache
+        if not tuya_device_id:
+            last_active = get_last_active_device()
+            if last_active:
+                tuya_device_id = last_active
+                log(f"[COMMAND] Usando último dispositivo ativo: {tuya_device_id}")
+            else:
+                # Tentar pegar o único dispositivo no cache
+                cache = load_devices_cache()
+                device_ids = [k for k in cache.keys() if not k.startswith("_")]
+                if len(device_ids) == 1:
+                    tuya_device_id = device_ids[0]
+                    log(f"[COMMAND] Usando único dispositivo no cache: {tuya_device_id}")
+                else:
+                    return jsonify({
+                        "ok": False,
+                        "error": "tuya_device_id é obrigatório quando há múltiplos dispositivos no cache"
+                    }), 400
+        
+        # Garantir que temos um device_id válido
+        if not tuya_device_id:
+            return jsonify({"ok": False, "error": "tuya_device_id é obrigatório"}), 400
+        
+        # Normalizar version
+        version = normalize_version(version)
+        if version is not None and version <= 0:
+            return jsonify({"ok": False, "error": "version deve ser um número positivo"}), 400
+        
+        # Extrair device_name se fornecido
+        device_name = data.get("device_name")
+        
+        # FALLBACK: Se local_key, lan_ip ou version não vierem no JSON, buscar do cache persistente ou banco
+        used_fallback = False
+        fallback_source = None
+        
+        if not local_key or not lan_ip or lan_ip == "auto" or version is None:
+            log(f"[COMMAND] Dados incompletos no JSON - buscando do cache persistente/banco")
+            log(f"[COMMAND] local_key presente: {bool(local_key)}, lan_ip: {lan_ip}, version: {version}")
+            
+            # PRIORIDADE 1: Cache persistente local
+            cached_device = get_device_from_cache(tuya_device_id)
+            if cached_device:
+                log(f"[COMMAND] Device encontrado no cache persistente")
+                used_fallback = True
+                fallback_source = "cache_local"
+                
+                # Usar dados do cache apenas se não vieram no JSON
+                if not local_key:
+                    local_key = cached_device.get('local_key')
+                    if local_key:
+                        log(f"[COMMAND] local_key obtida do cache local: {mask_local_key(local_key)}")
+                
+                if not lan_ip or lan_ip == "auto":
+                    lan_ip = cached_device.get('lan_ip')
+                    if lan_ip:
+                        log(f"[COMMAND] lan_ip obtido do cache local: {lan_ip}")
+                
+                if version is None:
+                    cached_version = cached_device.get('version')
+                    if cached_version:
+                        version = normalize_version(cached_version)
+                        if version:
+                            log(f"[COMMAND] version obtida do cache local: {version}")
+            
+            # PRIORIDADE 2: Banco de dados (se cache local não tiver todos os dados)
+            if (not local_key or not lan_ip or lan_ip == "auto" or version is None):
+                db_devices = get_devices_from_db([tuya_device_id])
+                if tuya_device_id in db_devices:
+                    db_device = db_devices[tuya_device_id]
+                    log(f"[COMMAND] Device encontrado no banco, usando dados do banco")
+                    used_fallback = True
+                    fallback_source = "banco"
+                    
+                    # Usar dados do banco apenas se não vieram no JSON e não estão no cache
+                    if not local_key:
+                        local_key = db_device.get('local_key')
+                        if local_key:
+                            log(f"[COMMAND] local_key obtida do banco: {mask_local_key(local_key)}")
+                    
+                    if not lan_ip or lan_ip == "auto":
+                        lan_ip = db_device.get('lan_ip')
+                        if lan_ip:
+                            log(f"[COMMAND] lan_ip obtido do banco: {lan_ip}")
+                    
+                    if version is None:
+                        protocol_version = db_device.get('protocol_version')
+                        if protocol_version:
+                            version = normalize_version(protocol_version)
+                            if version:
+                                log(f"[COMMAND] version obtida do banco: {version}")
+                else:
+                    log(f"[COMMAND] Device {tuya_device_id} não encontrado no banco")
+        
+        # Validar se temos os dados mínimos necessários
+        if not local_key:
+            return jsonify({"ok": False, "error": "local_key é obrigatório e não foi encontrado no cache ou banco"}), 400
+        
+        # Converter version para float (já normalizado, mas garantir)
+        version_float = None
+        if version is not None:
+            version_float = float(version)
+        
+        send_tuya_command(
+            action=action,
+            tuya_device_id=tuya_device_id,
+            local_key=local_key,
+            lan_ip=lan_ip,
+            version=version_float
+        )
+        
+        # SALVAR NO CACHE PERSISTENTE sempre que tivermos dados completos
+        # Isso garante que nas próximas chamadas não precisaremos enviar tudo novamente
+        # Salvar mesmo se veio do banco, para acelerar próximas chamadas
+        if local_key and lan_ip and version_float:
+            save_device_to_cache(
+                tuya_device_id=tuya_device_id,
+                local_key=local_key,
+                lan_ip=lan_ip,
+                version=version_float,
+                device_name=device_name
+            )
+            # Salvar como último dispositivo ativo
+            set_last_active_device(tuya_device_id)
+            log(f"[COMMAND] Dados salvos no cache persistente para próximas chamadas")
+        
+        # Sempre retornar dados do dispositivo para atualizar cache no cliente
+        # Isso garante que o cache seja atualizado mesmo quando não usa fallback
+        # NÃO incluir local_key no response por segurança
+        response_data = {
+            "ok": True,
+            "device": {
+                "id": tuya_device_id,
+                "ip": str(lan_ip) if lan_ip else "",
+                "version": str(version_float) if version_float else ""
+            }
+        }
+        
+        if used_fallback:
+            log(f"[COMMAND] Retornando dados do dispositivo (usado fallback: {fallback_source})")
+        else:
+            log(f"[COMMAND] Retornando dados do dispositivo (dados do JSON)")
+        
+        return jsonify(response_data), 200
+    
+    except Exception as e:
+        err = str(e)
+        log(f"[ERRO] API /tuya/command: {err}")
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": err}), 500
+
 @app.route("/tuya/devices", methods=["GET"])
 def api_tuya_devices():
     """Retorna lista de dispositivos escaneados na rede"""
@@ -999,216 +1328,21 @@ def api_tuya_devices():
         traceback.print_exc()
         return jsonify({"ok": False, "error": err}), 500
 
-@app.route("/tuya/poll", methods=["GET"])
-def api_tuya_poll():
-    """
-    Endpoint para polling reverso - cliente verifica se há comandos pendentes.
-    Funciona mesmo com firewall/AP Isolation porque cliente inicia a conexão.
-    
-    Query params:
-    - tuya_device_id: ID do dispositivo Tuya
-    - timeout: Tempo máximo para aguardar comandos (opcional, padrão: 5 segundos)
-    
-    Retorna:
-    {
-        "ok": true,
-        "has_commands": true/false,
-        "commands": [comando1, comando2, ...]  # Só se has_commands=true
-    }
-    """
-    try:
-        tuya_device_id = request.args.get("tuya_device_id")
-        timeout = int(request.args.get("timeout", 5))
-        
-        if not tuya_device_id:
-            return jsonify({
-                "ok": False,
-                "error": "tuya_device_id é obrigatório"
-            }), 400
-        
-        # Verificar se há comandos pendentes para este dispositivo
-        if tuya_device_id in PENDING_COMMANDS_QUEUE and len(PENDING_COMMANDS_QUEUE[tuya_device_id]) > 0:
-            # Retornar todos os comandos pendentes
-            commands = PENDING_COMMANDS_QUEUE[tuya_device_id].copy()
-            # Limpar fila após retornar
-            PENDING_COMMANDS_QUEUE[tuya_device_id] = []
-            
-            log(f"[POLL] Cliente consultou comandos pendentes para {tuya_device_id}: {len(commands)} comando(s)")
-            
-            return jsonify({
-                "ok": True,
-                "has_commands": True,
-                "commands": commands
-            }), 200
-        else:
-            # Não há comandos pendentes
-            return jsonify({
-                "ok": True,
-                "has_commands": False,
-                "commands": []
-            }), 200
-    
-    except Exception as e:
-        err = str(e)
-        log(f"[ERRO] API /tuya/poll: {err}")
-        traceback.print_exc()
-        return jsonify({"ok": False, "error": err}), 500
-
-@app.route("/tuya/command", methods=["POST"])
-def api_tuya_command():
-    """
-    Endpoint para enviar comando.
-    Se não conseguir enviar diretamente (firewall/AP Isolation), adiciona à fila para polling.
-    """
-    try:
-        data: Dict[str, Any] = request.get_json(force=True, silent=True) or {}
-        
-        action = data.get("action")
-        tuya_device_id = data.get("tuya_device_id")
-        local_key = data.get("local_key")
-        lan_ip = data.get("lan_ip")  # pode vir None, vazio ou "auto"
-        version = data.get("version")  # pode vir None, vazio ou um número (ex: 3.3, 3.4)
-        
-        if action not in ("on", "off"):
-            return jsonify({"ok": False, "error": "action deve ser 'on' ou 'off'"}), 400
-        
-        if not tuya_device_id:
-            return jsonify({"ok": False, "error": "tuya_device_id é obrigatório"}), 400
-        
-        # FALLBACK: Se local_key, lan_ip ou version não vierem no JSON, buscar do banco
-        used_fallback = False
-        if not local_key or not lan_ip or lan_ip == "auto" or not version:
-            log(f"[COMMAND] Dados incompletos no JSON - buscando do banco como fallback")
-            log(f"[COMMAND] local_key presente: {bool(local_key)}, lan_ip: {lan_ip}, version: {version}")
-            
-            db_devices = get_devices_from_db([tuya_device_id])
-            if tuya_device_id in db_devices:
-                db_device = db_devices[tuya_device_id]
-                log(f"[COMMAND] Device encontrado no banco, usando dados do cache")
-                used_fallback = True
-                
-                # Usar dados do banco apenas se não vieram no JSON
-                if not local_key:
-                    local_key = db_device.get('local_key')
-                    log(f"[COMMAND] local_key obtida do banco: {local_key[:8] if local_key else 'None'}...")
-                
-                if not lan_ip or lan_ip == "auto":
-                    lan_ip = db_device.get('lan_ip')
-                    log(f"[COMMAND] lan_ip obtido do banco: {lan_ip}")
-                
-                if not version:
-                    protocol_version = db_device.get('protocol_version')
-                    if protocol_version:
-                        try:
-                            version = float(protocol_version)
-                            log(f"[COMMAND] version obtida do banco: {version}")
-                        except (ValueError, TypeError):
-                            version = None
-            else:
-                log(f"[COMMAND] Device {tuya_device_id} não encontrado no banco")
-        
-        # Validar se temos os dados mínimos necessários
-        if not local_key:
-            return jsonify({"ok": False, "error": "local_key é obrigatório e não foi encontrado no banco"}), 400
-        
-        # Converte version para float se vier como string
-        if version is not None and version != "":
-            try:
-                version = float(version)
-            except (ValueError, TypeError):
-                version = None
-        
-        # Tentar enviar comando diretamente
-        try:
-            send_tuya_command(
-                action=action,
-                tuya_device_id=tuya_device_id,
-                local_key=local_key,
-                lan_ip=lan_ip,
-                version=version
-            )
-            command_success = True
-            log(f"[COMMAND] Comando enviado diretamente com sucesso")
-        except Exception as cmd_error:
-            log(f"[COMMAND] Erro ao enviar comando diretamente: {cmd_error}")
-            log(f"[COMMAND] Adicionando comando à fila para polling reverso...")
-            command_success = False
-            
-            # Adicionar comando à fila para polling reverso
-            if tuya_device_id not in PENDING_COMMANDS_QUEUE:
-                PENDING_COMMANDS_QUEUE[tuya_device_id] = []
-            
-            command_data = {
-                "action": action,
-                "tuya_device_id": tuya_device_id,
-                "local_key": local_key,
-                "lan_ip": lan_ip,
-                "version": version,
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            }
-            PENDING_COMMANDS_QUEUE[tuya_device_id].append(command_data)
-            log(f"[COMMAND] Comando adicionado à fila. Total na fila: {len(PENDING_COMMANDS_QUEUE[tuya_device_id])}")
-        
-        # Enviar heartbeat imediatamente após comando bem-sucedido
-        if command_success:
-            try:
-                log(f"[COMMAND] Comando bem-sucedido, enviando heartbeat imediato...")
-                heartbeat_success = update_device_heartbeat(tuya_device_id)
-                if heartbeat_success:
-                    log(f"[COMMAND] ✅ Heartbeat enviado com sucesso após comando")
-                else:
-                    log(f"[COMMAND] ⚠️ Heartbeat falhou após comando (não crítico, será tentado no próximo ciclo)")
-            except Exception as heartbeat_error:
-                log(f"[COMMAND] ⚠️ Erro ao enviar heartbeat após comando: {heartbeat_error}")
-                # Não falhar o comando se heartbeat falhar - heartbeat periódico vai tentar depois
-        
-        # Sempre retornar dados do dispositivo para atualizar cache no cliente
-        response_data = {
-            "ok": True,
-            "command_sent": command_success,
-            "use_polling": not command_success,  # Indica se deve usar polling
-            "device": {
-                "id": tuya_device_id,
-                "ip": str(lan_ip) if lan_ip else "",
-                "version": str(version) if version else "",
-                "local_key": local_key or ""
-            }
-        }
-        
-        if not command_success:
-            response_data["message"] = "Comando adicionado à fila. Use /tuya/poll para receber comandos."
-            response_data["poll_url"] = f"/tuya/poll?tuya_device_id={tuya_device_id}"
-        
-        if used_fallback:
-            log(f"[COMMAND] Retornando dados do dispositivo (usado fallback do banco)")
-        else:
-            log(f"[COMMAND] Retornando dados do dispositivo (dados do JSON)")
-        
-        return jsonify(response_data), 200
-    
-    except Exception as e:
-        err = str(e)
-        log(f"[ERRO] API /tuya/command: {err}")
-        traceback.print_exc()
-        return jsonify({"ok": False, "error": err}), 500
-
 @app.route("/tuya/heartbeat", methods=["POST"])
 def api_tuya_heartbeat():
     """
     Atualiza o campo servidor_online de um dispositivo (heartbeat/ping).
     Atualiza com o timestamp atual para indicar que o servidor está online.
-    Também atualiza informações adicionais: SSID, velocidade WiFi e nível de bateria.
     
     Body:
     {
-        "tuya_device_id": "bf1234567890abcdef",
-        "wifi_ssid": "NomeDaRede" (opcional),
-        "wifi_speed": 65 (opcional, em Mbps),
-        "battery_level": 85 (opcional, 0-100)
+        "tuya_device_id": "bf1234567890abcdef"
     }
     """
     try:
-        data: Dict[str, Any] = request.get_json(force=True, silent=True) or {}
+        data: Dict[str, Any] = request.get_json(silent=True)
+        if data is None:
+            return jsonify({"ok": False, "error": "JSON inválido"}), 400
         
         tuya_device_id = data.get("tuya_device_id")
         
@@ -1218,18 +1352,8 @@ def api_tuya_heartbeat():
                 "error": "tuya_device_id é obrigatório"
             }), 400
         
-        # Extrair informações adicionais (opcionais)
-        wifi_ssid = data.get("wifi_ssid")
-        wifi_speed = data.get("wifi_speed")
-        battery_level = data.get("battery_level")
-        
-        # Atualizar heartbeat no banco (com informações adicionais)
-        success = update_device_heartbeat(
-            tuya_device_id,
-            wifi_ssid=wifi_ssid,
-            wifi_speed=wifi_speed,
-            battery_level=battery_level
-        )
+        # Atualizar heartbeat no banco
+        success = update_device_heartbeat(tuya_device_id)
         
         if success:
             return jsonify({
@@ -1273,7 +1397,7 @@ def fetch_local_key_from_tuya_api(tuya_device_id: str) -> Optional[str]:
                 log(f"[TUYA_API] Conta incompleta, pulando...")
                 continue
             
-            log(f"[TUYA_API] Tentando buscar local_key para {tuya_device_id} na conta {access_id[:8]}...")
+            log(f"[TUYA_API] Tentando buscar local_key para {tuya_device_id} na conta {mask_local_key(access_id, 8)}...")
             
             api = TuyaOpenAPI(endpoint, access_id, access_key)
             api.connect()
@@ -1286,7 +1410,7 @@ def fetch_local_key_from_tuya_api(tuya_device_id: str) -> Optional[str]:
                 local_key = result.get("local_key")
                 
                 if local_key:
-                    log(f"[TUYA_API] local_key encontrada para {tuya_device_id}: {local_key[:8]}...")
+                    log(f"[TUYA_API] local_key encontrada para {tuya_device_id}: {mask_local_key(local_key)}")
                     return local_key
                 else:
                     log(f"[TUYA_API] local_key não encontrada na resposta para {tuya_device_id}")
@@ -1294,7 +1418,7 @@ def fetch_local_key_from_tuya_api(tuya_device_id: str) -> Optional[str]:
                 log(f"[TUYA_API] Erro ao buscar /v2.0/cloud/thing/{tuya_device_id}: {detail_v2}")
         
         except Exception as e:
-            log(f"[TUYA_API] Erro ao buscar local_key na conta {account.get('access_id', 'unknown')[:8]}: {e}")
+            log(f"[TUYA_API] Erro ao buscar local_key na conta {mask_local_key(account.get('access_id', 'unknown'), 8)}: {e}")
             traceback.print_exc()
             continue
     
@@ -1305,11 +1429,10 @@ def fetch_local_key_from_tuya_api(tuya_device_id: str) -> Optional[str]:
 def api_sync_devices():
     """
     Sincroniza devices encontrados na rede LAN com a tabela tuya_devices.
-    Também sincroniza contas Tuya do banco se for a primeira vez ou se não houver contas locais.
     Para cada device encontrado na rede, se existir na tabela com mesmo tuya_device_id,
     atualiza: lan_ip, protocol_version (sempre que disponíveis do scan).
     Opcionalmente pode receber site_id, name e local_key no body para atualizar também.
-
+    
     Body opcional:
     {
         "site_id": "Nome da Unidade",
@@ -1324,16 +1447,6 @@ def api_sync_devices():
     """
     try:
         log("[SYNC] Iniciando sincronização de devices...")
-        
-        # Sincronizar contas Tuya do banco antes de sincronizar dispositivos
-        # Isso garante que as contas estejam atualizadas quando precisar buscar local_key
-        if not TUYA_ACCOUNTS:
-            log("[SYNC] Nenhuma conta Tuya local encontrada, sincronizando do banco...")
-            try:
-                sync_tuya_accounts_from_database()
-            except Exception as e:
-                log(f"[SYNC] Aviso: Não foi possível sincronizar contas Tuya: {e}")
-                # Continuar mesmo se falhar, pode usar contas padrão
         
         # Ler dados opcionais do body
         body_data = request.get_json(silent=True) or {}
@@ -1384,7 +1497,7 @@ def api_sync_devices():
                 local_key_from_api = fetch_local_key_from_tuya_api(tuya_id)
                 if local_key_from_api:
                     local_key_from_body = local_key_from_api
-                    log(f"[SYNC] local_key obtida da API Tuya para {tuya_id}")
+                    log(f"[SYNC] local_key obtida da API Tuya para {tuya_id}: {mask_local_key(local_key_from_api)}")
                 else:
                     log(f"[SYNC] Não foi possível obter local_key da API Tuya para {tuya_id}")
             
@@ -1484,45 +1597,6 @@ def api_sync_devices():
 def start_server(host="0.0.0.0", port=8000):
     """Inicia o servidor Flask"""
     log(f"[START] Servidor Tuya local rodando em http://{host}:{port} (SITE={SITE_NAME})")
-    log(f"[START] ⚠️ IMPORTANTE: Para aceitar conexões de outros dispositivos na rede:")
-    log(f"[START] - Servidor está escutando em 0.0.0.0 (todas as interfaces)")
-    log(f"[START] - Porta: {port}")
-    log(f"[START] - Outros dispositivos podem conectar usando o IP local deste dispositivo")
-    log(f"[START] - Exemplo: http://[IP_LOCAL]:{port}/tuya/command")
-    log(f"[START] ⚠️ Se não funcionar de outros dispositivos:")
-    log(f"[START] 1. Verifique se AP Isolation está DESATIVADO no roteador")
-    log(f"[START] 2. Verifique firewall do Android (alguns bloqueiam conexões de entrada)")
-    log(f"[START] 3. Certifique-se que ambos dispositivos estão na mesma rede WiFi")
-    log(f"[START] 4. Se firewall bloquear, tente usar porta diferente (8080, 8888, etc)")
     # Faz o scan inicial
     scan_and_print_devices()
-    # Usar threaded=True para aceitar múltiplas conexões simultâneas
-    # Usar use_reloader=False para evitar problemas no Android
-    try:
-        app.run(host=host, port=port, debug=False, use_reloader=False, threaded=True)
-    except OSError as e:
-        # Se porta estiver em uso ou bloqueada, tentar porta alternativa
-        if "Address already in use" in str(e) or "Permission denied" in str(e):
-            log(f"[START] Porta {port} bloqueada ou em uso, tentando portas alternativas...")
-            for alt_port in ALTERNATIVE_PORTS:
-                if alt_port == port:
-                    continue
-                try:
-                    log(f"[START] Tentando porta alternativa: {alt_port}")
-                    app.run(host=host, port=alt_port, debug=False, use_reloader=False, threaded=True)
-                    break
-                except Exception as alt_e:
-                    log(f"[START] Porta {alt_port} também falhou: {alt_e}")
-                    continue
-        else:
-            raise
-    except Exception as e:
-        log(f"[START] ERRO ao iniciar servidor: {e}")
-        log(f"[START] Tentando novamente com configurações alternativas...")
-        # Tentar novamente sem threaded (alguns Android podem não suportar)
-        try:
-            app.run(host=host, port=port, debug=False, use_reloader=False)
-        except Exception as e2:
-            log(f"[START] ERRO crítico ao iniciar servidor: {e2}")
-            raise
-
+    app.run(host=host, port=port, debug=False, use_reloader=False)
