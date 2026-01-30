@@ -4,6 +4,7 @@ import os
 import json
 import traceback
 import threading
+import time
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone
 from urllib.parse import urlencode
@@ -401,7 +402,7 @@ def create_device_in_db(
         traceback.print_exc()
         return False
 
-def tuya_status_with_timeout(device: Any, timeout_seconds: int = 10) -> Optional[Dict]:
+def tuya_status_with_timeout(device: Any, timeout_seconds: int = 20) -> Optional[Dict]:
     """Executa status() com timeout para evitar travamentos."""
     result = [None]
     exception = [None]
@@ -426,7 +427,7 @@ def tuya_status_with_timeout(device: Any, timeout_seconds: int = 10) -> Optional
     
     return result[0]
 
-def tuya_command_with_timeout(device: Any, action: str, timeout_seconds: int = 10) -> Optional[Dict]:
+def tuya_command_with_timeout(device: Any, action: str, timeout_seconds: int = 20) -> Optional[Dict]:
     """Executa turn_on() ou turn_off() com timeout para evitar travamentos."""
     result = [None]
     exception = [None]
@@ -502,7 +503,7 @@ def update_device_heartbeat(tuya_device_id: str) -> bool:
                 d.set_version(version)
                 
                 # Consultar status do dispositivo com timeout (não altera o estado, apenas verifica conexão)
-                status = tuya_status_with_timeout(d, timeout_seconds=10)
+                status = tuya_status_with_timeout(d, timeout_seconds=20)
                 
                 if status:
                     device_online = True
@@ -981,31 +982,67 @@ def send_tuya_command(
     log(f"[INFO] [{SITE_NAME}] Enviando '{action}' → {tuya_device_id} @ {lan_ip} (versão {version})")
     log(f"[INFO] local_key: {mask_local_key(local_key)}")
     
-    try:
-        d = tinytuya.OutletDevice(tuya_device_id, lan_ip, local_key)
+    # Retry automático: 3 tentativas
+    max_retries = 3
+    last_error = None
+    
+    for attempt in range(1, max_retries + 1):
+        try:
+            if attempt > 1:
+                log(f"[INFO] Tentativa {attempt}/{max_retries} para enviar comando '{action}'")
+                # Pequeno delay entre tentativas (1 segundo)
+                time.sleep(1)
+            
+            d = tinytuya.OutletDevice(tuya_device_id, lan_ip, local_key)
+            
+            # Usa a versão normalizada
+            d.set_version(version)
+            
+            # Usar função com timeout aumentado para 20s
+            resp = tuya_command_with_timeout(d, action, timeout_seconds=20)
+            
+            if resp is None:
+                # Timeout - tentar novamente se ainda houver tentativas
+                if attempt < max_retries:
+                    log(f"[INFO] Timeout na tentativa {attempt}, tentando novamente...")
+                    last_error = RuntimeError("Timeout ao enviar comando para dispositivo")
+                    continue
+                else:
+                    # Última tentativa falhou - limpar cache apenas se todas falharam
+                    log(f"[INFO] Todas as {max_retries} tentativas falharam por timeout")
+                    with DEVICE_CACHE_LOCK:
+                        if tuya_device_id in DEVICE_CACHE:
+                            log(f"[INFO] Limpando cache de IP para {tuya_device_id} devido a timeout após {max_retries} tentativas")
+                            del DEVICE_CACHE[tuya_device_id]
+                    raise RuntimeError(f"Timeout ao enviar comando para dispositivo após {max_retries} tentativas")
+            
+            # Sucesso!
+            log(f"[DEBUG] Resposta do dispositivo: {resp}")
+            if attempt > 1:
+                log(f"[INFO] Comando enviado com sucesso na tentativa {attempt}")
+            return  # Comando enviado com sucesso, sair da função
         
-        # Usa a versão normalizada
-        d.set_version(version)
-        
-        # Usar função com timeout
-        resp = tuya_command_with_timeout(d, action, timeout_seconds=10)
-        
-        if resp is None:
-            # Timeout - limpar cache
-            with DEVICE_CACHE_LOCK:
-                if tuya_device_id in DEVICE_CACHE:
-                    log(f"[INFO] Limpando cache de IP para {tuya_device_id} devido a timeout")
-                    del DEVICE_CACHE[tuya_device_id]
-            raise RuntimeError("Timeout ao enviar comando para dispositivo")
-        
-        log(f"[DEBUG] Resposta do dispositivo: {resp}")
-    except Exception as e:
-        # Limpar cache se houver erro de conexão
-        with DEVICE_CACHE_LOCK:
-            if tuya_device_id in DEVICE_CACHE:
-                log(f"[INFO] Limpando cache de IP para {tuya_device_id} devido a erro")
-                del DEVICE_CACHE[tuya_device_id]
-        raise RuntimeError(f"Erro ao enviar comando para dispositivo: {e}")
+        except Exception as e:
+            last_error = e
+            log(f"[INFO] Erro na tentativa {attempt}/{max_retries}: {e}")
+            
+            # Se não for a última tentativa, continuar
+            if attempt < max_retries:
+                log(f"[INFO] Tentando novamente...")
+                continue
+            else:
+                # Última tentativa falhou - limpar cache apenas se todas falharam
+                log(f"[INFO] Todas as {max_retries} tentativas falharam")
+                with DEVICE_CACHE_LOCK:
+                    if tuya_device_id in DEVICE_CACHE:
+                        log(f"[INFO] Limpando cache de IP para {tuya_device_id} devido a erro após {max_retries} tentativas")
+                        del DEVICE_CACHE[tuya_device_id]
+                raise RuntimeError(f"Erro ao enviar comando para dispositivo após {max_retries} tentativas: {e}")
+    
+    # Se chegou aqui, todas as tentativas falharam
+    if last_error:
+        raise last_error
+    raise RuntimeError("Erro desconhecido ao enviar comando para dispositivo")
 
 # =========================
 # API HTTP
