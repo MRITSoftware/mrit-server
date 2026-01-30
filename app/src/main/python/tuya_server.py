@@ -561,6 +561,7 @@ def update_device_heartbeat(
     Atualiza o campo servidor_online de um device (heartbeat/ping).
     Primeiro tenta fazer ping na placa física, depois atualiza o banco.
     Aceita métricas opcionais: battery_level (0-100) e internet_speed_mbps.
+    A velocidade da internet é salva no campo wifi_speed (integer) do banco.
     """
     if not REQUESTS_AVAILABLE:
         log("[DB] requests não está disponível")
@@ -681,9 +682,12 @@ def update_device_heartbeat(
         
         if internet_speed_mbps is not None:
             # Validar velocidade (deve ser positiva)
+            # Usar campo wifi_speed que já existe na tabela (integer)
             if internet_speed_mbps >= 0:
-                update_data["internet_speed_mbps"] = round(internet_speed_mbps, 2)
-                log(f"[HEARTBEAT] Velocidade da internet: {internet_speed_mbps:.2f} Mbps")
+                # Converter Mbps para inteiro (arredondar)
+                wifi_speed_int = int(round(internet_speed_mbps))
+                update_data["wifi_speed"] = wifi_speed_int
+                log(f"[HEARTBEAT] Velocidade da internet: {internet_speed_mbps:.2f} Mbps (salvando como wifi_speed={wifi_speed_int})")
             else:
                 log(f"[HEARTBEAT] Velocidade da internet inválida (negativa): {internet_speed_mbps}")
         
@@ -691,7 +695,8 @@ def update_device_heartbeat(
         if battery_level is not None and 0 <= battery_level <= 100:
             metrics_info.append(f"bateria={battery_level}%")
         if internet_speed_mbps is not None and internet_speed_mbps >= 0:
-            metrics_info.append(f"velocidade={internet_speed_mbps:.2f} Mbps")
+            wifi_speed_int = int(round(internet_speed_mbps))
+            metrics_info.append(f"velocidade={wifi_speed_int} Mbps")
         
         metrics_str = f", {', '.join(metrics_info)}" if metrics_info else ""
         log(f"[HEARTBEAT] Atualizando servidor_online para device {tuya_device_id} (timestamp: {timestamp_iso}, placa online: {device_online}{metrics_str})")
@@ -709,7 +714,23 @@ def update_device_heartbeat(
                     log(f"[HEARTBEAT] Tentativa {attempt}/{max_retries} para atualizar heartbeat (timeout: {timeout_seconds}s)")
                     time.sleep(1)  # Delay entre tentativas
                 
+                # Log detalhado do que está sendo enviado
+                log(f"[HEARTBEAT] Enviando PATCH para {url}")
+                log(f"[HEARTBEAT] Dados a atualizar: {update_data}")
+                
                 response = requests.patch(url, json=update_data, headers=headers_with_prefer, timeout=timeout_seconds)
+                
+                # Log da resposta antes de verificar status
+                log(f"[HEARTBEAT] Status code: {response.status_code}")
+                log(f"[HEARTBEAT] Response headers: {dict(response.headers)}")
+                
+                # Tentar ler resposta mesmo se houver erro
+                try:
+                    response_text = response.text
+                    log(f"[HEARTBEAT] Response body: {response_text[:500]}")  # Primeiros 500 caracteres
+                except:
+                    pass
+                
                 response.raise_for_status()
                 
                 # Verificar se o update realmente aconteceu (status 204 ou 200)
@@ -734,7 +755,16 @@ def update_device_heartbeat(
                     log(f"[HEARTBEAT] Device {tuya_device_id} não encontrado no banco")
                 else:
                     log(f"[HEARTBEAT] Erro HTTP ao atualizar heartbeat para device {tuya_device_id}: {e}")
-                    log(f"[HEARTBEAT] Response: {e.response.text if hasattr(e, 'response') else 'N/A'}")
+                    if hasattr(e, 'response'):
+                        log(f"[HEARTBEAT] Status code: {e.response.status_code}")
+                        log(f"[HEARTBEAT] Response headers: {dict(e.response.headers)}")
+                        try:
+                            error_text = e.response.text
+                            log(f"[HEARTBEAT] Response body: {error_text[:500]}")
+                        except:
+                            pass
+                    else:
+                        log(f"[HEARTBEAT] Response: N/A")
                 return False
         
         return False
@@ -1573,12 +1603,13 @@ def api_tuya_heartbeat():
     Atualiza o campo servidor_online de um dispositivo (heartbeat/ping).
     Atualiza com o timestamp atual para indicar que o servidor está online.
     Também aceita métricas opcionais: battery_level e internet_speed_mbps.
+    A velocidade da internet é salva no campo wifi_speed (integer) do banco.
     
     Body:
     {
         "tuya_device_id": "bf1234567890abcdef",
         "battery_level": 85,  # opcional: porcentagem de bateria (0-100)
-        "internet_speed_mbps": 25.5  # opcional: velocidade da internet em Mbps
+        "internet_speed_mbps": 25.5  # opcional: velocidade da internet em Mbps (salvo como wifi_speed)
     }
     """
     try:

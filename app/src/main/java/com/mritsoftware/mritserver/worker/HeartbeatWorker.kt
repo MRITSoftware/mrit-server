@@ -193,14 +193,23 @@ class HeartbeatWorker(
                 put("tuya_device_id", deviceId)
                 if (batteryLevel != null) {
                     put("battery_level", batteryLevel)
+                    Log.d(TAG, "Incluindo battery_level no JSON: $batteryLevel")
+                } else {
+                    Log.d(TAG, "battery_level é null, não incluindo no JSON")
                 }
                 if (internetSpeed != null) {
                     put("internet_speed_mbps", internetSpeed)
+                    Log.d(TAG, "Incluindo internet_speed_mbps no JSON: $internetSpeed")
+                } else {
+                    Log.d(TAG, "internet_speed_mbps é null, não incluindo no JSON")
                 }
             }
             
+            val jsonString = jsonBody.toString()
+            Log.d(TAG, "JSON sendo enviado: $jsonString")
+            
             val writer = OutputStreamWriter(connection.outputStream, "UTF-8")
-            writer.write(jsonBody.toString())
+            writer.write(jsonString)
             writer.flush()
             writer.close()
             
