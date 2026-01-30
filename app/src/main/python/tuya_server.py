@@ -373,23 +373,14 @@ def create_device_in_db(
         # Criar usando Supabase REST API
         url = f"{base_url}/tuya_devices"
         
-        log(f"[DB] Tentando criar device {tuya_device_id}")
-        log(f"[DB] URL: {url}")
-        log(f"[DB] Dados: {device_data}")
-        
         response = requests.post(url, json=device_data, headers=headers, timeout=10)
-        
-        log(f"[DB] Status code: {response.status_code}")
-        log(f"[DB] Response: {response.text[:200]}")  # Primeiros 200 caracteres
         
         response.raise_for_status()
         
         data = response.json()
         if data and len(data) > 0:
-            log(f"[DB] Device {tuya_device_id} criado com sucesso: {data}")
             return True
         else:
-            log(f"[DB] Resposta vazia ao criar device {tuya_device_id}")
             return False
         
     except requests.exceptions.HTTPError as e:
@@ -623,23 +614,29 @@ def update_device_in_db(
         # Supabase usa formato: /rest/v1/tuya_devices?tuya_device_id=eq.{id}
         url = f"{base_url}/tuya_devices?tuya_device_id=eq.{tuya_device_id}"
         
-        log(f"[DB] Tentando atualizar device {tuya_device_id}")
-        log(f"[DB] URL: {url}")
-        log(f"[DB] Dados: {update_data}")
-        
         response = requests.patch(url, json=update_data, headers=headers, timeout=10)
         
-        log(f"[DB] Status code: {response.status_code}")
-        log(f"[DB] Response: {response.text[:200]}")  # Primeiros 200 caracteres
-        
-        response.raise_for_status()
-        
-        data = response.json()
-        if data and len(data) > 0:
-            log(f"[DB] Device {tuya_device_id} atualizado com sucesso: {data}")
-            return True
+        # Status 204 (No Content) significa sucesso sem retornar dados
+        # Status 200 significa sucesso com dados retornados
+        if response.status_code in (200, 204):
+            # Se for 204, não há body para ler
+            if response.status_code == 204:
+                return True
+            
+            # Se for 200, verificar se há dados retornados
+            try:
+                data = response.json()
+                if data and len(data) > 0:
+                    return True
+                else:
+                    # Array vazio pode significar sucesso se o Prefer não retornar dados
+                    return True
+            except ValueError:
+                # Se não conseguir fazer parse do JSON, mas status é 200, assumir sucesso
+                return True
         else:
-            log(f"[DB] Nenhum device encontrado com tuya_device_id = {tuya_device_id}")
+            # Outros status codes - tratar como erro
+            response.raise_for_status()
             return False
         
     except requests.exceptions.HTTPError as e:
@@ -1548,11 +1545,12 @@ def api_sync_devices():
                 update_data = {}
                 
                 # Sempre atualizar lan_ip e protocol_version se disponíveis do scan
-                if lan_ip and lan_ip != db_info.get('lan_ip'):
+                # Atualizar mesmo se parecer igual, para garantir que o timestamp seja atualizado
+                if lan_ip:
                     update_data['lan_ip'] = lan_ip
                     update_needed = True
                 
-                if protocol_version and protocol_version != db_info.get('protocol_version'):
+                if protocol_version:
                     update_data['protocol_version'] = protocol_version
                     update_needed = True
                 
@@ -1561,11 +1559,10 @@ def api_sync_devices():
                     update_data['site_id'] = site_id_from_body
                     update_needed = True
                 
-                # Sempre atualizar name com site_id se fornecido
-                if site_id_from_body:
-                    if name_from_body != db_info.get('name'):
-                        update_data['name'] = name_from_body
-                        update_needed = True
+                # Atualizar name se fornecido no body e diferente do banco
+                if name_from_body and name_from_body != db_info.get('name'):
+                    update_data['name'] = name_from_body
+                    update_needed = True
                 
                 # Atualizar local_key se fornecido no body
                 if local_key_from_body and local_key_from_body != db_info.get('local_key'):
@@ -1590,8 +1587,6 @@ def api_sync_devices():
                             "updated_fields": list(update_data.keys())
                         })
                         log(f"[SYNC] Device {tuya_id} atualizado: {list(update_data.keys())}")
-                else:
-                    log(f"[SYNC] Device {tuya_id} já está atualizado")
             else:
                 # Device não existe: CRIAR
                 log(f"[SYNC] Device {tuya_id} não encontrado no banco, criando novo registro...")
