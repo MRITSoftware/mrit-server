@@ -330,6 +330,7 @@ def get_devices_from_db(tuya_device_ids: List[str]) -> Dict[str, Dict]:
     """
     Busca devices da tabela tuya_devices pelos tuya_device_id.
     Retorna um dict onde a chave é tuya_device_id e o valor é um dict com os dados.
+    Com retry automático para lidar com latência de internet.
     """
     if not REQUESTS_AVAILABLE or not SUPABASE_CONFIG.get("url"):
         return {}
@@ -337,45 +338,70 @@ def get_devices_from_db(tuya_device_ids: List[str]) -> Dict[str, Dict]:
     if not tuya_device_ids:
         return {}
     
-    try:
-        base_url = get_supabase_url()
-        headers = get_supabase_headers()
-        
-        # Usar requests com params para URL encoding correto
-        # Supabase PostgREST usa formato: tuya_device_id=in.(id1,id2,id3)
-        # Construir a query string corretamente com URL encoding
-        ids_list = ",".join(tuya_device_ids)
-        params = {
-            "tuya_device_id": f"in.({ids_list})",
-            "select": "*"
-        }
-        
-        url = f"{base_url}/tuya_devices"
-        response = requests.get(url, headers=headers, params=params, timeout=10)
-        response.raise_for_status()
-        
-        data = response.json()
-        result = {}
-        for row in data:
-            tuya_id = row.get('tuya_device_id')
-            if tuya_id:
-                result[tuya_id] = {
-                    'id': str(row.get('id', '')),
-                    'site_id': row.get('site_id'),
-                    'tuya_device_id': tuya_id,
-                    'name': row.get('name'),
-                    'local_key': row.get('local_key'),
-                    'lan_ip': row.get('lan_ip'),
-                    'protocol_version': row.get('protocol_version')
-                }
-        
-        log(f"[DB] Encontrados {len(result)} devices no banco")
-        return result
-        
-    except Exception as e:
-        log(f"[DB] Erro ao buscar devices: {e}")
-        traceback.print_exc()
-        return {}
+    # Retry para lidar com internet lenta
+    max_retries = 2
+    timeout_seconds = 30  # Timeout aumentado para internet lenta
+    
+    for attempt in range(1, max_retries + 1):
+        try:
+            base_url = get_supabase_url()
+            headers = get_supabase_headers()
+            
+            # Usar requests com params para URL encoding correto
+            # Supabase PostgREST usa formato: tuya_device_id=in.(id1,id2,id3)
+            # Construir a query string corretamente com URL encoding
+            ids_list = ",".join(tuya_device_ids)
+            params = {
+                "tuya_device_id": f"in.({ids_list})",
+                "select": "*"
+            }
+            
+            url = f"{base_url}/tuya_devices"
+            
+            if attempt > 1:
+                log(f"[DB] Tentativa {attempt}/{max_retries} para buscar devices (timeout: {timeout_seconds}s)")
+                time.sleep(1)  # Delay entre tentativas
+            
+            response = requests.get(url, headers=headers, params=params, timeout=timeout_seconds)
+            response.raise_for_status()
+            
+            data = response.json()
+            result = {}
+            for row in data:
+                tuya_id = row.get('tuya_device_id')
+                if tuya_id:
+                    result[tuya_id] = {
+                        'id': str(row.get('id', '')),
+                        'site_id': row.get('site_id'),
+                        'tuya_device_id': tuya_id,
+                        'name': row.get('name'),
+                        'local_key': row.get('local_key'),
+                        'lan_ip': row.get('lan_ip'),
+                        'protocol_version': row.get('protocol_version')
+                    }
+            
+            log(f"[DB] Encontrados {len(result)} devices no banco")
+            return result
+            
+        except requests.exceptions.Timeout as e:
+            log(f"[DB] Timeout ao buscar devices (tentativa {attempt}/{max_retries}): {e}")
+            if attempt < max_retries:
+                log(f"[DB] Tentando novamente...")
+                continue
+            else:
+                log(f"[DB] Todas as tentativas falharam por timeout. Internet pode estar muito lenta.")
+                return {}
+        except requests.exceptions.HTTPError as e:
+            log(f"[DB] Erro HTTP ao buscar devices: {e}")
+            log(f"[DB] Response: {e.response.text if hasattr(e, 'response') else 'N/A'}")
+            traceback.print_exc()
+            return {}
+        except Exception as e:
+            log(f"[DB] Erro ao buscar devices: {e}")
+            traceback.print_exc()
+            return {}
+    
+    return {}
 
 def create_device_in_db(
     tuya_device_id: str,
@@ -421,30 +447,51 @@ def create_device_in_db(
         # Criar usando Supabase REST API
         url = f"{base_url}/tuya_devices"
         
-        log(f"[DB] Tentando criar device {tuya_device_id}")
-        log(f"[DB] URL: {url}")
-        log(f"[DB] Dados: {device_data}")
+        # Retry para lidar com internet lenta
+        max_retries = 2
+        timeout_seconds = 30  # Timeout aumentado para internet lenta
         
-        response = requests.post(url, json=device_data, headers=headers, timeout=10)
+        for attempt in range(1, max_retries + 1):
+            try:
+                if attempt > 1:
+                    log(f"[DB] Tentativa {attempt}/{max_retries} para criar device {tuya_device_id}")
+                    time.sleep(1)  # Delay entre tentativas
+                
+                log(f"[DB] Tentando criar device {tuya_device_id} (tentativa {attempt}/{max_retries})")
+                log(f"[DB] URL: {url}")
+                log(f"[DB] Dados: {device_data}")
+                
+                response = requests.post(url, json=device_data, headers=headers, timeout=timeout_seconds)
+                
+                log(f"[DB] Status code: {response.status_code}")
+                log(f"[DB] Response: {response.text[:200]}")  # Primeiros 200 caracteres
+                
+                response.raise_for_status()
+                
+                data = response.json()
+                if data and len(data) > 0:
+                    log(f"[DB] Device {tuya_device_id} criado com sucesso: {data}")
+                    return True
+                else:
+                    log(f"[DB] Resposta vazia ao criar device {tuya_device_id}")
+                    return False
+                    
+            except requests.exceptions.Timeout as e:
+                log(f"[DB] Timeout ao criar device {tuya_device_id} (tentativa {attempt}/{max_retries}): {e}")
+                if attempt < max_retries:
+                    log(f"[DB] Tentando novamente...")
+                    continue
+                else:
+                    log(f"[DB] Todas as tentativas falharam por timeout. Internet pode estar muito lenta.")
+                    return False
+            except requests.exceptions.HTTPError as e:
+                log(f"[DB] Erro HTTP ao criar device {tuya_device_id}: {e}")
+                log(f"[DB] Response: {e.response.text if hasattr(e, 'response') else 'N/A'}")
+                traceback.print_exc()
+                return False
         
-        log(f"[DB] Status code: {response.status_code}")
-        log(f"[DB] Response: {response.text[:200]}")  # Primeiros 200 caracteres
-        
-        response.raise_for_status()
-        
-        data = response.json()
-        if data and len(data) > 0:
-            log(f"[DB] Device {tuya_device_id} criado com sucesso: {data}")
-            return True
-        else:
-            log(f"[DB] Resposta vazia ao criar device {tuya_device_id}")
-            return False
-        
-    except requests.exceptions.HTTPError as e:
-        log(f"[DB] Erro HTTP ao criar device {tuya_device_id}: {e}")
-        log(f"[DB] Response: {e.response.text if hasattr(e, 'response') else 'N/A'}")
-        traceback.print_exc()
         return False
+        
     except Exception as e:
         log(f"[DB] Erro ao criar device {tuya_device_id}: {e}")
         traceback.print_exc()
@@ -505,10 +552,15 @@ def tuya_command_with_timeout(device: Any, action: str, timeout_seconds: int = 2
     
     return result[0]
 
-def update_device_heartbeat(tuya_device_id: str) -> bool:
+def update_device_heartbeat(
+    tuya_device_id: str,
+    battery_level: Optional[int] = None,
+    internet_speed_mbps: Optional[float] = None
+) -> bool:
     """
     Atualiza o campo servidor_online de um device (heartbeat/ping).
     Primeiro tenta fazer ping na placa física, depois atualiza o banco.
+    Aceita métricas opcionais: battery_level (0-100) e internet_speed_mbps.
     """
     if not REQUESTS_AVAILABLE:
         log("[DB] requests não está disponível")
@@ -523,9 +575,37 @@ def update_device_heartbeat(tuya_device_id: str) -> bool:
         headers = get_supabase_headers()
         
         # Buscar dados do dispositivo no banco (precisa de IP e local_key para ping)
-        url_get = f"{base_url}/tuya_devices?tuya_device_id=eq.{tuya_device_id}&select=id,lan_ip,local_key,protocol_version"
-        response_get = requests.get(url_get, headers=headers, timeout=10)
-        response_get.raise_for_status()
+        # Retry para lidar com internet lenta
+        max_retries = 2
+        timeout_seconds = 30  # Timeout aumentado para internet lenta
+        response_get = None
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                url_get = f"{base_url}/tuya_devices?tuya_device_id=eq.{tuya_device_id}&select=id,lan_ip,local_key,protocol_version"
+                
+                if attempt > 1:
+                    log(f"[HEARTBEAT] Tentativa {attempt}/{max_retries} para buscar device (timeout: {timeout_seconds}s)")
+                    time.sleep(1)  # Delay entre tentativas
+                
+                response_get = requests.get(url_get, headers=headers, timeout=timeout_seconds)
+                response_get.raise_for_status()
+                break  # Sucesso, sair do loop
+                
+            except requests.exceptions.Timeout as e:
+                log(f"[HEARTBEAT] Timeout ao buscar device (tentativa {attempt}/{max_retries}): {e}")
+                if attempt < max_retries:
+                    log(f"[HEARTBEAT] Tentando novamente...")
+                    continue
+                else:
+                    log(f"[HEARTBEAT] Todas as tentativas falharam por timeout. Internet pode estar muito lenta.")
+                    return False
+            except requests.exceptions.HTTPError as e:
+                log(f"[HEARTBEAT] Erro HTTP ao buscar device: {e}")
+                return False
+        
+        if response_get is None:
+            return False
         
         devices = response_get.json()
         if not devices or len(devices) == 0:
@@ -587,24 +667,77 @@ def update_device_heartbeat(tuya_device_id: str) -> bool:
         # Atualizar usando Supabase REST API
         url = f"{base_url}/tuya_devices?tuya_device_id=eq.{tuya_device_id}"
         
-        # Atualizar apenas o campo servidor_online com timestamp atual
+        # Atualizar servidor_online com timestamp atual e métricas opcionais
         update_data = {"servidor_online": timestamp_iso}
         
-        log(f"[HEARTBEAT] Atualizando servidor_online para device {tuya_device_id} (timestamp: {timestamp_iso}, placa online: {device_online})")
+        # Adicionar métricas opcionais se fornecidas
+        if battery_level is not None:
+            # Validar bateria (0-100)
+            if 0 <= battery_level <= 100:
+                update_data["battery_level"] = battery_level
+                log(f"[HEARTBEAT] Bateria: {battery_level}%")
+            else:
+                log(f"[HEARTBEAT] Bateria inválida (fora do range 0-100): {battery_level}")
+        
+        if internet_speed_mbps is not None:
+            # Validar velocidade (deve ser positiva)
+            if internet_speed_mbps >= 0:
+                update_data["internet_speed_mbps"] = round(internet_speed_mbps, 2)
+                log(f"[HEARTBEAT] Velocidade da internet: {internet_speed_mbps:.2f} Mbps")
+            else:
+                log(f"[HEARTBEAT] Velocidade da internet inválida (negativa): {internet_speed_mbps}")
+        
+        metrics_info = []
+        if battery_level is not None and 0 <= battery_level <= 100:
+            metrics_info.append(f"bateria={battery_level}%")
+        if internet_speed_mbps is not None and internet_speed_mbps >= 0:
+            metrics_info.append(f"velocidade={internet_speed_mbps:.2f} Mbps")
+        
+        metrics_str = f", {', '.join(metrics_info)}" if metrics_info else ""
+        log(f"[HEARTBEAT] Atualizando servidor_online para device {tuya_device_id} (timestamp: {timestamp_iso}, placa online: {device_online}{metrics_str})")
         
         # Usar PATCH com Prefer: return=minimal para não retornar dados
-        headers_with_prefer = {**headers, "Prefer": "return=minimal,resolution=merge-duplicates"}
-        response = requests.patch(url, json=update_data, headers=headers_with_prefer, timeout=10)
+        # Retry para lidar com internet lenta
+        max_retries = 2
+        timeout_seconds = 30  # Timeout aumentado para internet lenta
         
-        response.raise_for_status()
+        for attempt in range(1, max_retries + 1):
+            try:
+                headers_with_prefer = {**headers, "Prefer": "return=minimal,resolution=merge-duplicates"}
+                
+                if attempt > 1:
+                    log(f"[HEARTBEAT] Tentativa {attempt}/{max_retries} para atualizar heartbeat (timeout: {timeout_seconds}s)")
+                    time.sleep(1)  # Delay entre tentativas
+                
+                response = requests.patch(url, json=update_data, headers=headers_with_prefer, timeout=timeout_seconds)
+                response.raise_for_status()
+                
+                # Verificar se o update realmente aconteceu (status 204 ou 200)
+                if response.status_code in (200, 204):
+                    log(f"[HEARTBEAT] servidor_online atualizado com sucesso para device {tuya_device_id} (status: {response.status_code}, placa online: {device_online})")
+                    return True
+                else:
+                    log(f"[HEARTBEAT] Resposta inesperada do Supabase: {response.status_code}")
+                    return False
+                    
+            except requests.exceptions.Timeout as e:
+                log(f"[HEARTBEAT] Timeout ao atualizar heartbeat (tentativa {attempt}/{max_retries}): {e}")
+                if attempt < max_retries:
+                    log(f"[HEARTBEAT] Tentando novamente...")
+                    continue
+                else:
+                    log(f"[HEARTBEAT] Todas as tentativas falharam por timeout. Internet pode estar muito lenta.")
+                    return False
+            except requests.exceptions.HTTPError as e:
+                # Se o device não existir, não é erro crítico para heartbeat
+                if e.response.status_code == 404 or (hasattr(e, 'response') and e.response.status_code == 406):
+                    log(f"[HEARTBEAT] Device {tuya_device_id} não encontrado no banco")
+                else:
+                    log(f"[HEARTBEAT] Erro HTTP ao atualizar heartbeat para device {tuya_device_id}: {e}")
+                    log(f"[HEARTBEAT] Response: {e.response.text if hasattr(e, 'response') else 'N/A'}")
+                return False
         
-        # Verificar se o update realmente aconteceu (status 204 ou 200)
-        if response.status_code in (200, 204):
-            log(f"[HEARTBEAT] servidor_online atualizado com sucesso para device {tuya_device_id} (status: {response.status_code}, placa online: {device_online})")
-            return True
-        else:
-            log(f"[HEARTBEAT] Resposta inesperada do Supabase: {response.status_code}")
-            return False
+        return False
         
     except requests.exceptions.HTTPError as e:
         # Se o device não existir, não é erro crítico para heartbeat
@@ -671,30 +804,51 @@ def update_device_in_db(
         # Supabase usa formato: /rest/v1/tuya_devices?tuya_device_id=eq.{id}
         url = f"{base_url}/tuya_devices?tuya_device_id=eq.{tuya_device_id}"
         
-        log(f"[DB] Tentando atualizar device {tuya_device_id}")
-        log(f"[DB] URL: {url}")
-        log(f"[DB] Dados: {update_data}")
+        # Retry para lidar com internet lenta
+        max_retries = 2
+        timeout_seconds = 30  # Timeout aumentado para internet lenta
         
-        response = requests.patch(url, json=update_data, headers=headers, timeout=10)
+        for attempt in range(1, max_retries + 1):
+            try:
+                if attempt > 1:
+                    log(f"[DB] Tentativa {attempt}/{max_retries} para atualizar device {tuya_device_id}")
+                    time.sleep(1)  # Delay entre tentativas
+                
+                log(f"[DB] Tentando atualizar device {tuya_device_id} (tentativa {attempt}/{max_retries})")
+                log(f"[DB] URL: {url}")
+                log(f"[DB] Dados: {update_data}")
+                
+                response = requests.patch(url, json=update_data, headers=headers, timeout=timeout_seconds)
+                
+                log(f"[DB] Status code: {response.status_code}")
+                log(f"[DB] Response: {response.text[:200]}")  # Primeiros 200 caracteres
+                
+                response.raise_for_status()
+                
+                data = response.json()
+                if data and len(data) > 0:
+                    log(f"[DB] Device {tuya_device_id} atualizado com sucesso: {data}")
+                    return True
+                else:
+                    log(f"[DB] Nenhum device encontrado com tuya_device_id = {tuya_device_id}")
+                    return False
+                    
+            except requests.exceptions.Timeout as e:
+                log(f"[DB] Timeout ao atualizar device {tuya_device_id} (tentativa {attempt}/{max_retries}): {e}")
+                if attempt < max_retries:
+                    log(f"[DB] Tentando novamente...")
+                    continue
+                else:
+                    log(f"[DB] Todas as tentativas falharam por timeout. Internet pode estar muito lenta.")
+                    return False
+            except requests.exceptions.HTTPError as e:
+                log(f"[DB] Erro HTTP ao atualizar device {tuya_device_id}: {e}")
+                log(f"[DB] Response: {e.response.text if hasattr(e, 'response') else 'N/A'}")
+                traceback.print_exc()
+                return False
         
-        log(f"[DB] Status code: {response.status_code}")
-        log(f"[DB] Response: {response.text[:200]}")  # Primeiros 200 caracteres
-        
-        response.raise_for_status()
-        
-        data = response.json()
-        if data and len(data) > 0:
-            log(f"[DB] Device {tuya_device_id} atualizado com sucesso: {data}")
-            return True
-        else:
-            log(f"[DB] Nenhum device encontrado com tuya_device_id = {tuya_device_id}")
-            return False
-        
-    except requests.exceptions.HTTPError as e:
-        log(f"[DB] Erro HTTP ao atualizar device {tuya_device_id}: {e}")
-        log(f"[DB] Response: {e.response.text if hasattr(e, 'response') else 'N/A'}")
-        traceback.print_exc()
         return False
+        
     except Exception as e:
         log(f"[DB] Erro ao atualizar device {tuya_device_id}: {e}")
         traceback.print_exc()
@@ -1418,10 +1572,13 @@ def api_tuya_heartbeat():
     """
     Atualiza o campo servidor_online de um dispositivo (heartbeat/ping).
     Atualiza com o timestamp atual para indicar que o servidor está online.
+    Também aceita métricas opcionais: battery_level e internet_speed_mbps.
     
     Body:
     {
-        "tuya_device_id": "bf1234567890abcdef"
+        "tuya_device_id": "bf1234567890abcdef",
+        "battery_level": 85,  # opcional: porcentagem de bateria (0-100)
+        "internet_speed_mbps": 25.5  # opcional: velocidade da internet em Mbps
     }
     """
     try:
@@ -1430,6 +1587,8 @@ def api_tuya_heartbeat():
             return jsonify({"ok": False, "error": "JSON inválido"}), 400
         
         tuya_device_id = data.get("tuya_device_id")
+        battery_level = data.get("battery_level")  # opcional
+        internet_speed_mbps = data.get("internet_speed_mbps")  # opcional
         
         if not tuya_device_id:
             return jsonify({
@@ -1437,13 +1596,27 @@ def api_tuya_heartbeat():
                 "error": "tuya_device_id é obrigatório"
             }), 400
         
-        # Atualizar heartbeat no banco
-        success = update_device_heartbeat(tuya_device_id)
+        # Log das métricas recebidas
+        metrics_log = []
+        if battery_level is not None:
+            metrics_log.append(f"bateria={battery_level}%")
+        if internet_speed_mbps is not None:
+            metrics_log.append(f"velocidade={internet_speed_mbps} Mbps")
+        
+        if metrics_log:
+            log(f"[HEARTBEAT] Métricas recebidas: {', '.join(metrics_log)}")
+        
+        # Atualizar heartbeat no banco (com métricas opcionais)
+        success = update_device_heartbeat(tuya_device_id, battery_level, internet_speed_mbps)
         
         if success:
+            response_msg = f"Heartbeat atualizado com sucesso para device {tuya_device_id}"
+            if metrics_log:
+                response_msg += f" ({', '.join(metrics_log)})"
+            
             return jsonify({
                 "ok": True,
-                "message": f"Heartbeat atualizado com sucesso para device {tuya_device_id}"
+                "message": response_msg
             }), 200
         else:
             return jsonify({

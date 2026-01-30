@@ -2,6 +2,10 @@ package com.mritsoftware.mritserver.worker
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.os.BatteryManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.os.Build
 import android.util.Log
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
@@ -77,8 +81,14 @@ class HeartbeatWorker(
                 return androidx.work.ListenableWorker.Result.success() // Não é erro, apenas não há device configurado
             }
             
-            // Chamar endpoint de heartbeat
-            val success = sendHeartbeat(deviceId)
+            // Coletar métricas do sistema
+            val batteryLevel = getBatteryLevel()
+            val internetSpeed = getInternetSpeed()
+            
+            Log.d(TAG, "Métricas coletadas - Bateria: $batteryLevel%, Velocidade: $internetSpeed Mbps")
+            
+            // Chamar endpoint de heartbeat com métricas
+            val success = sendHeartbeat(deviceId, batteryLevel, internetSpeed)
             
             if (success) {
                 // Salvar device_id no app state para usar como fallback no próximo heartbeat
@@ -115,7 +125,61 @@ class HeartbeatWorker(
         }
     }
     
-    private suspend fun sendHeartbeat(deviceId: String): Boolean = withContext(Dispatchers.IO) {
+    private fun getBatteryLevel(): Int? {
+        return try {
+            val batteryManager = applicationContext.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
+            batteryManager?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+        } catch (e: Exception) {
+            Log.w(TAG, "Erro ao obter nível de bateria: ${e.message}")
+            null
+        }
+    }
+    
+    private fun getInternetSpeed(): Double? {
+        return try {
+            val connectivityManager = applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            val network = connectivityManager?.activeNetwork
+            val capabilities = network?.let { connectivityManager.getNetworkCapabilities(it) }
+            
+            if (capabilities != null) {
+                // Verificar se tem internet
+                if (capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                    capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) {
+                    
+                    // Tentar obter velocidade estimada (downlink em bps, converter para Mbps)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        val downlinkBps = capabilities.linkDownstreamBandwidthKbps
+                        if (downlinkBps > 0) {
+                            // Converter de Kbps para Mbps
+                            return (downlinkBps / 1000.0)
+                        }
+                    }
+                    
+                    // Fallback: estimar baseado no tipo de conexão
+                    when {
+                        capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> {
+                            // WiFi geralmente tem boa velocidade, estimar 10-50 Mbps
+                            25.0 // Valor médio estimado
+                        }
+                        capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> {
+                            // Celular varia muito, estimar 5-20 Mbps
+                            10.0 // Valor médio estimado
+                        }
+                        else -> null
+                    }
+                } else {
+                    null
+                }
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Erro ao obter velocidade da internet: ${e.message}")
+            null
+        }
+    }
+    
+    private suspend fun sendHeartbeat(deviceId: String, batteryLevel: Int?, internetSpeed: Double?): Boolean = withContext(Dispatchers.IO) {
         return@withContext try {
             val url = URL("http://127.0.0.1:8000/tuya/heartbeat")
             val connection = url.openConnection() as HttpURLConnection
@@ -127,6 +191,12 @@ class HeartbeatWorker(
             
             val jsonBody = JSONObject().apply {
                 put("tuya_device_id", deviceId)
+                if (batteryLevel != null) {
+                    put("battery_level", batteryLevel)
+                }
+                if (internetSpeed != null) {
+                    put("internet_speed_mbps", internetSpeed)
+                }
             }
             
             val writer = OutputStreamWriter(connection.outputStream, "UTF-8")
