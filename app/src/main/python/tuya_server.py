@@ -49,6 +49,26 @@ except ImportError:
 # CONFIG & AUTO-SETUP
 # =========================
 
+# Valores padrão do Supabase (configuração interna)
+DEFAULT_SUPABASE_URL = "https://kihyhoqbrkwbfudttevo.supabase.co"
+DEFAULT_SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtpaHlob3Ficmt3YmZ1ZHR0ZXZvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MTU1NTUwMjcsImV4cCI6MjAzMTEzMTAyN30.XtBTlSiqhsuUIKmhAMEyxofV-dRst7240n912m4O4Us"
+
+# Valores padrão das contas Tuya (configuração interna)
+DEFAULT_TUYA_ACCOUNTS = [
+    {
+        "access_id": "td7tp3cvq3nrc35emwg3",
+        "access_key": "bbcdaa3dfe9545fca4326fcfa1cf3e2c",
+        "endpoint": "https://openapi.tuyaus.com",
+        "uid": "az1715569264750N2mUr"
+    },
+    {
+        "access_id": "wwxsqj37wnfdnp98wu54",
+        "access_key": "d7a140221f3b4e8f916601af4fbd6816",
+        "endpoint": "https://openapi.tuyaus.com",
+        "uid": "az1759235287550HcJRz"
+    }
+]
+
 # No Android, usar o diretório de dados do app
 try:
     from android.storage import app_storage_path
@@ -99,16 +119,16 @@ def create_config_if_needed():
         cfg = {
             "site_name": site,
             "supabase": {
-                "url": "",
-                "anon_key": ""
+                "url": DEFAULT_SUPABASE_URL,
+                "anon_key": DEFAULT_SUPABASE_ANON_KEY
             },
-            "tuya_accounts": []
+            "tuya_accounts": DEFAULT_TUYA_ACCOUNTS.copy()
         }
         
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=4, ensure_ascii=False)
         
-        log(f"[OK] config.json criado com site_name = {site}")
+        log(f"[OK] config.json criado com site_name = {site} e configuração do Supabase")
 
 def update_site_name(new_name: str):
     """Atualiza o nome do site no config.json"""
@@ -237,12 +257,40 @@ if not isinstance(SUPABASE_CONFIG, dict):
 if not isinstance(TUYA_ACCOUNTS, list):
     TUYA_ACCOUNTS = []
 
-# Se ainda não há configuração, logar aviso mas não usar valores hardcoded
+# Se ainda não há configuração, usar valores padrão internos
 if not SUPABASE_CONFIG.get("url") or not SUPABASE_CONFIG.get("anon_key"):
-    log("[WARN] Configuração do Supabase não encontrada. Configure via /config/supabase ou variáveis de ambiente.")
+    SUPABASE_CONFIG = {
+        "url": DEFAULT_SUPABASE_URL,
+        "anon_key": DEFAULT_SUPABASE_ANON_KEY
+    }
+    
+    # Salvar no config.json
+    if os.path.exists(CONFIG_PATH):
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    else:
+        cfg = {}
+    cfg["supabase"] = SUPABASE_CONFIG
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=4, ensure_ascii=False)
+    
+    log("[INFO] Configuração do Supabase inicializada com valores padrão internos")
 
+# Se ainda não há contas Tuya configuradas, usar valores padrão internos
 if not TUYA_ACCOUNTS:
-    log("[WARN] Nenhuma conta Tuya configurada. Configure via /config/tuya ou variáveis de ambiente.")
+    TUYA_ACCOUNTS = DEFAULT_TUYA_ACCOUNTS.copy()
+    
+    # Salvar no config.json
+    if os.path.exists(CONFIG_PATH):
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    else:
+        cfg = {}
+    cfg["tuya_accounts"] = TUYA_ACCOUNTS
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=4, ensure_ascii=False)
+    
+    log(f"[INFO] Contas Tuya inicializadas com valores padrão internos: {len(TUYA_ACCOUNTS)} conta(s)")
 
 log(f"[INFO] Servidor local iniciado para SITE = {SITE_NAME}")
 
