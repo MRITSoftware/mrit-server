@@ -13,6 +13,7 @@ import com.mritsoftware.mritserver.MainActivity
 import com.mritsoftware.mritserver.R
 import com.mritsoftware.mritserver.ui.ConnectedActivity
 import com.mritsoftware.mritserver.service.HeartbeatService
+import com.mritsoftware.mritserver.util.BatteryOptimizationHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -52,6 +53,9 @@ class PythonServerService : Service() {
             return START_NOT_STICKY
         }
         
+        // Verificar proteções contra otimizações de bateria
+        checkBatteryOptimizations()
+        
         // Iniciar como foreground service para rodar em background
         startForeground(NOTIFICATION_ID, createNotification())
         startPythonServer()
@@ -71,18 +75,20 @@ class PythonServerService : Service() {
     
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            // IMPORTANCE_LOW pode fazer o sistema matar o serviço
-            // IMPORTANCE_LOW = sem som, sem vibração, mas visível
-            // IMPORTANCE_MIN = pode ser ocultado pelo sistema
+            // IMPORTANCE_DEFAULT é mais resistente a ser morto pelo sistema
+            // IMPORTANCE_LOW pode fazer o sistema matar o serviço em alguns dispositivos
+            // IMPORTANCE_DEFAULT = visível, pode fazer som/vibração, menos provável de ser morto
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "Servidor",
-                NotificationManager.IMPORTANCE_LOW
+                NotificationManager.IMPORTANCE_DEFAULT // Mudado de LOW para DEFAULT para maior proteção
             ).apply {
                 description = "Servidor rodando em background"
                 setShowBadge(false)
                 // Não permitir que o sistema oculte a notificação
                 lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                // Não permitir que o usuário desabilite o canal (alguns dispositivos)
+                setBypassDnd(false)
             }
             
             val notificationManager = getSystemService(NotificationManager::class.java)
@@ -114,9 +120,10 @@ class PythonServerService : Service() {
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentIntent(pendingIntent)
             .setOngoing(true) // Não pode ser removida pelo usuário
-            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT) // Mudado de LOW para DEFAULT para maior proteção
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE) // Android 14+
             .build()
     }
     
@@ -242,6 +249,21 @@ class PythonServerService : Service() {
             Log.d(TAG, "Site name configurado: $siteName")
         } catch (e: Exception) {
             Log.e(TAG, "Erro ao atualizar site name", e)
+        }
+    }
+    
+    private fun checkBatteryOptimizations() {
+        try {
+            val isProtected = BatteryOptimizationHelper.isIgnoringBatteryOptimizations(this)
+            if (!isProtected) {
+                Log.w(TAG, "⚠️ APP NÃO ESTÁ PROTEGIDO CONTRA OTIMIZAÇÕES DE BATERIA")
+                Log.w(TAG, "⚠️ O Android pode matar o processo em background")
+                Log.w(TAG, "⚠️ Recomendado: Usuário deve desativar otimizações nas configurações")
+            } else {
+                Log.d(TAG, "✓ App está protegido contra otimizações de bateria")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Erro ao verificar otimizações de bateria: ${e.message}", e)
         }
     }
     

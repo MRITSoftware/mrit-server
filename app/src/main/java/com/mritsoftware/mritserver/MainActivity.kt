@@ -16,7 +16,9 @@ import com.mritsoftware.mritserver.service.PythonServerService
 import com.mritsoftware.mritserver.ui.SettingsActivity
 import com.mritsoftware.mritserver.ui.DeviceDiscoveryActivity
 import com.mritsoftware.mritserver.ui.DeviceDetailsActivity
+import com.mritsoftware.mritserver.util.BatteryOptimizationHelper
 import android.content.Intent
+import android.content.SharedPreferences
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -40,13 +42,40 @@ class MainActivity : AppCompatActivity() {
         setupToolbar()
         setupViews()
         setupRecyclerView()
-                setupListeners()
-                startServerService()
-                // Aguardar servidor iniciar antes de carregar dispositivos
-                coroutineScope.launch {
-                    kotlinx.coroutines.delay(3000) // Dar tempo para o servidor Python iniciar
-                    refreshDevices()
-                }
+        setupListeners()
+        
+        // Verificar proteção contra otimizações de bateria
+        checkBatteryOptimizations()
+        
+        startServerService()
+        // Aguardar servidor iniciar antes de carregar dispositivos
+        coroutineScope.launch {
+            kotlinx.coroutines.delay(3000) // Dar tempo para o servidor Python iniciar
+            refreshDevices()
+        }
+    }
+    
+    private fun checkBatteryOptimizations() {
+        // Verificar se precisa solicitar proteção contra otimizações de bateria
+        val prefs = getSharedPreferences("TuyaGateway", MODE_PRIVATE)
+        val lastCheck = prefs.getLong("last_battery_check", 0)
+        val now = System.currentTimeMillis()
+        
+        // Verificar apenas uma vez por dia
+        if (now - lastCheck > 24 * 60 * 60 * 1000) {
+            val isProtected = BatteryOptimizationHelper.checkAndRequestIfNeeded(this)
+            
+            if (!isProtected) {
+                Toast.makeText(
+                    this,
+                    "Para garantir que o servidor funcione em background, por favor desative as otimizações de bateria para este app nas configurações.",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+            
+            // Salvar timestamp da verificação
+            prefs.edit().putLong("last_battery_check", now).apply()
+        }
     }
     
     private fun startServerService() {

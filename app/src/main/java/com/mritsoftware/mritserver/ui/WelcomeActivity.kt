@@ -17,6 +17,7 @@ import com.mritsoftware.mritserver.R
 import com.mritsoftware.mritserver.adapter.WelcomeDevice
 import com.mritsoftware.mritserver.adapter.WelcomeDeviceAdapter
 import com.mritsoftware.mritserver.service.PythonServerService
+import com.mritsoftware.mritserver.util.BatteryOptimizationHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -68,6 +69,9 @@ class WelcomeActivity : AppCompatActivity() {
         setupViews()
         setupRecyclerView()
         setupListeners()
+        
+        // Verificar e solicitar proteção contra otimizações de bateria
+        checkBatteryOptimizations()
         
         // Iniciar servidor Python em background
         startPythonServer()
@@ -543,6 +547,31 @@ class WelcomeActivity : AppCompatActivity() {
         intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
         startActivity(intent)
         finish()
+    }
+    
+    private fun checkBatteryOptimizations() {
+        // Verificar se precisa solicitar proteção contra otimizações de bateria
+        // Só solicitar uma vez por sessão para não incomodar o usuário
+        val prefs = getSharedPreferences("TuyaGateway", MODE_PRIVATE)
+        val lastCheck = prefs.getLong("last_battery_check", 0)
+        val now = System.currentTimeMillis()
+        
+        // Verificar apenas uma vez por dia
+        if (now - lastCheck > 24 * 60 * 60 * 1000) {
+            val isProtected = BatteryOptimizationHelper.checkAndRequestIfNeeded(this)
+            
+            if (!isProtected) {
+                // Mostrar mensagem informativa ao usuário
+                android.widget.Toast.makeText(
+                    this,
+                    "Para garantir que o servidor funcione em background, por favor desative as otimizações de bateria para este app nas configurações.",
+                    android.widget.Toast.LENGTH_LONG
+                ).show()
+            }
+            
+            // Salvar timestamp da verificação
+            prefs.edit().putLong("last_battery_check", now).apply()
+        }
     }
     
     override fun onDestroy() {
