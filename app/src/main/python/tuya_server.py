@@ -69,6 +69,9 @@ DEFAULT_TUYA_ACCOUNTS = [
     }
 ]
 
+# Refresh periódico para manter comunicação com a placa
+DEVICE_REFRESH_INTERVAL_SECONDS = 15 * 60  # 15 minutos
+
 # No Android, usar o diretório de dados do app
 try:
     from android.storage import app_storage_path
@@ -652,11 +655,14 @@ def update_device_heartbeat(
                     if tuya_device_id in DEVICE_CACHE:
                         log(f"[HEARTBEAT] Limpando cache de IP para {tuya_device_id} devido a erro")
                         del DEVICE_CACHE[tuya_device_id]
-                # Continuar mesmo se ping falhar - atualizar banco de qualquer forma
-                # para indicar que o servidor tentou se comunicar
+                # Não atualizar servidor_online quando a placa não responde ao ping
         else:
             log(f"[HEARTBEAT] IP ou local_key não disponíveis para ping (IP: {lan_ip}, Key: {'presente' if local_key else 'ausente'})")
             # Continuar mesmo sem ping - atualizar banco para indicar que servidor está online
+        
+        if lan_ip and local_key and not device_online:
+            log("[HEARTBEAT] Placa não respondeu ao ping - servidor_online não atualizado")
+            return False
         
         # Atualizar servidor_online com timestamp atual (formato ISO 8601 UTC)
         # Usar timezone UTC para timestamp consistente
@@ -1177,6 +1183,53 @@ def discover_tuya_ip(tuya_device_id: str) -> Optional[str]:
 # TUYA
 # =========================
 
+def refresh_devices_once() -> None:
+    """Faz um refresh (status) nos dispositivos cacheados para manter a conexão ativa."""
+    try:
+        cache = load_devices_cache()
+        device_ids = [k for k in cache.keys() if not k.startswith("_")]
+        if not device_ids:
+            log("[REFRESH] Nenhum dispositivo no cache para refresh")
+            return
+        
+        log(f"[REFRESH] Iniciando refresh de {len(device_ids)} dispositivo(s)")
+        for device_id in device_ids:
+            device_data = cache.get(device_id) or {}
+            lan_ip = device_data.get("lan_ip")
+            local_key = device_data.get("local_key")
+            version = normalize_version(device_data.get("version") or device_data.get("protocol_version")) or 3.3
+            
+            if not lan_ip or not local_key:
+                log(f"[REFRESH] Pulando {device_id} (IP/local_key ausentes)")
+                continue
+            
+            try:
+                d = tinytuya.OutletDevice(device_id, lan_ip, local_key)
+                d.set_version(version)
+                status = tuya_status_with_timeout(d, timeout_seconds=8)
+                if status:
+                    log(f"[REFRESH] OK {device_id} @ {lan_ip}")
+                else:
+                    log(f"[REFRESH] Falha {device_id} @ {lan_ip} (timeout/erro)")
+            except Exception as e:
+                log(f"[REFRESH] Erro ao refrescar {device_id}: {e}")
+    except Exception as e:
+        log(f"[REFRESH] Erro geral no refresh: {e}")
+
+def start_device_refresh_loop(interval_seconds: int = DEVICE_REFRESH_INTERVAL_SECONDS) -> None:
+    """Inicia loop em background para refresh periódico."""
+    def refresh_loop():
+        while True:
+            try:
+                refresh_devices_once()
+            except Exception as e:
+                log(f"[REFRESH] Erro no loop: {e}")
+            time.sleep(interval_seconds)
+    
+    thread = threading.Thread(target=refresh_loop, daemon=True)
+    thread.start()
+    log(f"[REFRESH] Loop iniciado (intervalo: {interval_seconds}s)")
+
 def send_tuya_command(
     action: str,
     tuya_device_id: str,
@@ -1214,8 +1267,25 @@ def send_tuya_command(
     log(f"[INFO] [{SITE_NAME}] Enviando '{action}' → {tuya_device_id} @ {lan_ip} (versão {version})")
     log(f"[INFO] local_key: {mask_local_key(local_key)}")
     
-    # Retry automático: 3 tentativas
-    max_retries = 3
+    def create_device(ip: str) -> Any:
+        d = tinytuya.OutletDevice(tuya_device_id, ip, local_key)
+        d.set_version(version)
+        return d
+    
+    # Preflight: verificar se a placa responde antes do comando
+    preflight_device = create_device(lan_ip)
+    preflight_status = tuya_status_with_timeout(preflight_device, timeout_seconds=8)
+    if not preflight_status:
+        log(f"[INFO] Preflight falhou para {tuya_device_id} @ {lan_ip}. Tentando redescobrir IP...")
+        discovered_ip = discover_tuya_ip(tuya_device_id)
+        if discovered_ip:
+            lan_ip = discovered_ip
+            log(f"[INFO] IP redescoberto: {lan_ip}")
+        else:
+            log("[INFO] Não foi possível redescobrir IP no preflight")
+    
+    # Retry automático: 4 tentativas
+    max_retries = 4
     last_error = None
     
     for attempt in range(1, max_retries + 1):
@@ -1225,10 +1295,7 @@ def send_tuya_command(
                 # Pequeno delay entre tentativas (1 segundo)
                 time.sleep(1)
             
-            d = tinytuya.OutletDevice(tuya_device_id, lan_ip, local_key)
-            
-            # Usa a versão normalizada
-            d.set_version(version)
+            d = create_device(lan_ip)
             
             # Usar função com timeout aumentado para 20s
             resp = tuya_command_with_timeout(d, action, timeout_seconds=20)
@@ -1261,6 +1328,11 @@ def send_tuya_command(
             # Se não for a última tentativa, continuar
             if attempt < max_retries:
                 log(f"[INFO] Tentando novamente...")
+                # Tentar redescobrir IP antes da próxima tentativa
+                discovered_ip = discover_tuya_ip(tuya_device_id)
+                if discovered_ip:
+                    lan_ip = discovered_ip
+                    log(f"[INFO] IP redescoberto antes da próxima tentativa: {lan_ip}")
                 continue
             else:
                 # Última tentativa falhou - limpar cache apenas se todas falharam
@@ -1652,8 +1724,8 @@ def api_tuya_heartbeat():
         else:
             return jsonify({
                 "ok": False,
-                "error": f"Device {tuya_device_id} não encontrado ou erro ao atualizar"
-            }), 404
+                "error": "Heartbeat não atualizado (placa sem resposta ou erro)"
+            }), 200
     
     except Exception as e:
         err = str(e)
@@ -1888,4 +1960,6 @@ def start_server(host="0.0.0.0", port=8000):
     log(f"[START] Servidor Tuya local rodando em http://{host}:{port} (SITE={SITE_NAME})")
     # Faz o scan inicial
     scan_and_print_devices()
+    # Iniciar refresh periódico
+    start_device_refresh_loop()
     app.run(host=host, port=port, debug=False, use_reloader=False)
