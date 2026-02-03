@@ -71,6 +71,8 @@ DEFAULT_TUYA_ACCOUNTS = [
 
 # Refresh periódico para manter comunicação com a placa
 DEVICE_REFRESH_INTERVAL_SECONDS = 15 * 60  # 15 minutos
+DEVICE_REFRESH_FAILURE_THRESHOLD = 1  # Reiniciar servidor após N falhas consecutivas
+REFRESH_FAIL_COUNTS: Dict[str, int] = {}
 
 # No Android, usar o diretório de dados do app
 try:
@@ -1209,8 +1211,29 @@ def refresh_devices_once() -> None:
                 status = tuya_status_with_timeout(d, timeout_seconds=8)
                 if status:
                     log(f"[REFRESH] OK {device_id} @ {lan_ip}")
+                    REFRESH_FAIL_COUNTS[device_id] = 0
                 else:
-                    log(f"[REFRESH] Falha {device_id} @ {lan_ip} (timeout/erro)")
+                    log(f"[REFRESH] Falha {device_id} @ {lan_ip} (timeout/erro). Tentando redescobrir IP...")
+                    discovered_ip = discover_tuya_ip(device_id)
+                    if discovered_ip and discovered_ip != lan_ip:
+                        lan_ip = discovered_ip
+                        log(f"[REFRESH] IP redescoberto: {lan_ip}. Tentando status novamente...")
+                        d = tinytuya.OutletDevice(device_id, lan_ip, local_key)
+                        d.set_version(version)
+                        status_retry = tuya_status_with_timeout(d, timeout_seconds=8)
+                        if status_retry:
+                            log(f"[REFRESH] OK após redescoberta {device_id} @ {lan_ip}")
+                            REFRESH_FAIL_COUNTS[device_id] = 0
+                        else:
+                            log(f"[REFRESH] Falha após redescoberta {device_id} @ {lan_ip}")
+                            REFRESH_FAIL_COUNTS[device_id] = REFRESH_FAIL_COUNTS.get(device_id, 0) + 1
+                    else:
+                        log(f"[REFRESH] IP não redescoberto ou igual ({lan_ip}).")
+                        REFRESH_FAIL_COUNTS[device_id] = REFRESH_FAIL_COUNTS.get(device_id, 0) + 1
+                
+                if REFRESH_FAIL_COUNTS.get(device_id, 0) >= DEVICE_REFRESH_FAILURE_THRESHOLD:
+                    log(f"[REFRESH] {device_id} falhou {DEVICE_REFRESH_FAILURE_THRESHOLD}x. Reiniciando servidor...")
+                    os._exit(1)
             except Exception as e:
                 log(f"[REFRESH] Erro ao refrescar {device_id}: {e}")
     except Exception as e:
