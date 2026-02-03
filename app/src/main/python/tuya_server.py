@@ -1185,6 +1185,63 @@ def discover_tuya_ip(tuya_device_id: str) -> Optional[str]:
 # TUYA
 # =========================
 
+def recadastrar_device(
+    tuya_device_id: str,
+    site_id: str,
+    local_key: Optional[str]
+) -> Optional[str]:
+    """
+    Faz um recadastro leve do device:
+    - escaneia a LAN para achar IP/protocolo,
+    - atualiza/cria no Supabase usando o mesmo site_id,
+    - atualiza o cache local.
+    Retorna o lan_ip encontrado (se houver).
+    """
+    try:
+        log(f"[REC] Tentando recadastrar device {tuya_device_id} (site_id={site_id})")
+        lan_devices = scan_devices()
+        if not lan_devices or tuya_device_id not in lan_devices:
+            log(f"[REC] Device {tuya_device_id} não encontrado na LAN")
+            return None
+        
+        lan_info = lan_devices[tuya_device_id]
+        lan_ip = lan_info.get("ip")
+        protocol_version = lan_info.get("version")
+        if protocol_version:
+            protocol_version = str(protocol_version)
+        
+        cache_version = normalize_version(protocol_version)
+        save_device_to_cache(
+            tuya_device_id=tuya_device_id,
+            local_key=local_key,
+            lan_ip=lan_ip,
+            version=cache_version
+        )
+        
+        db_devices = get_devices_from_db([tuya_device_id])
+        if tuya_device_id in db_devices:
+            update_device_in_db(
+                tuya_device_id=tuya_device_id,
+                site_id=site_id,
+                local_key=local_key,
+                lan_ip=lan_ip,
+                protocol_version=protocol_version
+            )
+        else:
+            create_device_in_db(
+                tuya_device_id=tuya_device_id,
+                site_id=site_id,
+                name=site_id,
+                local_key=local_key,
+                lan_ip=lan_ip,
+                protocol_version=protocol_version
+            )
+        
+        return lan_ip
+    except Exception as e:
+        log(f"[REC] Erro ao recadastrar {tuya_device_id}: {e}")
+        return None
+
 def refresh_devices_once() -> None:
     """Faz um refresh (status) nos dispositivos cacheados para manter a conexão ativa."""
     try:
@@ -1206,12 +1263,13 @@ def refresh_devices_once() -> None:
                 continue
             
             try:
+                success = False
                 d = tinytuya.OutletDevice(device_id, lan_ip, local_key)
                 d.set_version(version)
                 status = tuya_status_with_timeout(d, timeout_seconds=8)
                 if status:
                     log(f"[REFRESH] OK {device_id} @ {lan_ip}")
-                    REFRESH_FAIL_COUNTS[device_id] = 0
+                    success = True
                 else:
                     log(f"[REFRESH] Falha {device_id} @ {lan_ip} (timeout/erro). Tentando redescobrir IP...")
                     discovered_ip = discover_tuya_ip(device_id)
@@ -1220,20 +1278,30 @@ def refresh_devices_once() -> None:
                         log(f"[REFRESH] IP redescoberto: {lan_ip}. Tentando status novamente...")
                         d = tinytuya.OutletDevice(device_id, lan_ip, local_key)
                         d.set_version(version)
-                        status_retry = tuya_status_with_timeout(d, timeout_seconds=8)
-                        if status_retry:
+                        if tuya_status_with_timeout(d, timeout_seconds=8):
                             log(f"[REFRESH] OK após redescoberta {device_id} @ {lan_ip}")
-                            REFRESH_FAIL_COUNTS[device_id] = 0
+                            success = True
+                    if not success:
+                        log(f"[REFRESH] Tentando recadastro do device {device_id}...")
+                        rec_lan_ip = recadastrar_device(device_id, SITE_NAME, local_key)
+                        if rec_lan_ip:
+                            lan_ip = rec_lan_ip
+                            log(f"[REFRESH] Recadastro encontrou IP {lan_ip}. Tentando status novamente...")
+                            d = tinytuya.OutletDevice(device_id, lan_ip, local_key)
+                            d.set_version(version)
+                            if tuya_status_with_timeout(d, timeout_seconds=8):
+                                log(f"[REFRESH] OK após recadastro {device_id} @ {lan_ip}")
+                                success = True
                         else:
-                            log(f"[REFRESH] Falha após redescoberta {device_id} @ {lan_ip}")
-                            REFRESH_FAIL_COUNTS[device_id] = REFRESH_FAIL_COUNTS.get(device_id, 0) + 1
-                    else:
-                        log(f"[REFRESH] IP não redescoberto ou igual ({lan_ip}).")
-                        REFRESH_FAIL_COUNTS[device_id] = REFRESH_FAIL_COUNTS.get(device_id, 0) + 1
+                            log(f"[REFRESH] Recadastro não encontrou o device {device_id}")
                 
-                if REFRESH_FAIL_COUNTS.get(device_id, 0) >= DEVICE_REFRESH_FAILURE_THRESHOLD:
-                    log(f"[REFRESH] {device_id} falhou {DEVICE_REFRESH_FAILURE_THRESHOLD}x. Reiniciando servidor...")
-                    os._exit(1)
+                if success:
+                    REFRESH_FAIL_COUNTS[device_id] = 0
+                else:
+                    REFRESH_FAIL_COUNTS[device_id] = REFRESH_FAIL_COUNTS.get(device_id, 0) + 1
+                    if REFRESH_FAIL_COUNTS.get(device_id, 0) >= DEVICE_REFRESH_FAILURE_THRESHOLD:
+                        log(f"[REFRESH] {device_id} falhou {DEVICE_REFRESH_FAILURE_THRESHOLD}x. Reiniciando servidor...")
+                        os._exit(1)
             except Exception as e:
                 log(f"[REFRESH] Erro ao refrescar {device_id}: {e}")
     except Exception as e:
