@@ -5,6 +5,7 @@ import json
 import traceback
 import threading
 import time
+import socket
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone
 from urllib.parse import urlencode
@@ -70,9 +71,10 @@ DEFAULT_TUYA_ACCOUNTS = [
 ]
 
 # Refresh periódico para manter comunicação com a placa
-DEVICE_REFRESH_INTERVAL_SECONDS = 15 * 60  # 15 minutos
-DEVICE_REFRESH_FAILURE_THRESHOLD = 1  # Reiniciar servidor após N falhas consecutivas
+DEVICE_REFRESH_INTERVAL_SECONDS = 5 * 60  # 5 minutos
+DEVICE_REFRESH_RETRY_ON_FAILURE_SECONDS = 60  # 1 minuto quando houver falha
 REFRESH_FAIL_COUNTS: Dict[str, int] = {}
+REFRESH_LAST_STATUS: Dict[str, bool] = {}
 
 # No Android, usar o diretório de dados do app
 try:
@@ -1242,16 +1244,26 @@ def recadastrar_device(
         log(f"[REC] Erro ao recadastrar {tuya_device_id}: {e}")
         return None
 
-def refresh_devices_once() -> None:
+def has_internet_connection(timeout_seconds: float = 2.0) -> bool:
+    """Verifica conectividade externa básica (sem depender de DNS HTTP)."""
+    try:
+        socket.create_connection(("8.8.8.8", 53), timeout=timeout_seconds).close()
+        return True
+    except Exception:
+        return False
+
+def refresh_devices_once() -> bool:
     """Faz um refresh (status) nos dispositivos cacheados para manter a conexão ativa."""
     try:
         cache = load_devices_cache()
         device_ids = [k for k in cache.keys() if not k.startswith("_")]
         if not device_ids:
             log("[REFRESH] Nenhum dispositivo no cache para refresh")
-            return
+            return False
         
         log(f"[REFRESH] Iniciando refresh de {len(device_ids)} dispositivo(s)")
+        has_failures = False
+        internet_ok = has_internet_connection()
         for device_id in device_ids:
             device_data = cache.get(device_id) or {}
             lan_ip = device_data.get("lan_ip")
@@ -1282,44 +1294,76 @@ def refresh_devices_once() -> None:
                             log(f"[REFRESH] OK após redescoberta {device_id} @ {lan_ip}")
                             success = True
                     if not success:
-                        log(f"[REFRESH] Tentando recadastro do device {device_id}...")
-                        rec_lan_ip = recadastrar_device(device_id, SITE_NAME, local_key)
-                        if rec_lan_ip:
-                            lan_ip = rec_lan_ip
-                            log(f"[REFRESH] Recadastro encontrou IP {lan_ip}. Tentando status novamente...")
-                            d = tinytuya.OutletDevice(device_id, lan_ip, local_key)
-                            d.set_version(version)
-                            if tuya_status_with_timeout(d, timeout_seconds=8):
-                                log(f"[REFRESH] OK após recadastro {device_id} @ {lan_ip}")
-                                success = True
+                        if internet_ok:
+                            log(f"[REFRESH] Tentando recadastro do device {device_id}...")
+                            rec_lan_ip = recadastrar_device(device_id, SITE_NAME, local_key)
+                            if rec_lan_ip:
+                                lan_ip = rec_lan_ip
+                                log(f"[REFRESH] Recadastro encontrou IP {lan_ip}. Tentando status novamente...")
+                                d = tinytuya.OutletDevice(device_id, lan_ip, local_key)
+                                d.set_version(version)
+                                if tuya_status_with_timeout(d, timeout_seconds=8):
+                                    log(f"[REFRESH] OK após recadastro {device_id} @ {lan_ip}")
+                                    success = True
+                            else:
+                                log(f"[REFRESH] Recadastro não encontrou o device {device_id}")
                         else:
-                            log(f"[REFRESH] Recadastro não encontrou o device {device_id}")
+                            log("[REFRESH] Sem internet - recadastro adiado para próximo ciclo")
                 
                 if success:
                     REFRESH_FAIL_COUNTS[device_id] = 0
+                    previous_status = REFRESH_LAST_STATUS.get(device_id)
+                    if previous_status is False:
+                        if internet_ok:
+                            # Dispara atualização no banco apenas na transição offline -> online
+                            heartbeat_ok = update_device_heartbeat(device_id)
+                            if heartbeat_ok:
+                                REFRESH_LAST_STATUS[device_id] = True
+                            else:
+                                # Mantém como offline para tentar sincronizar novamente no próximo ciclo
+                                REFRESH_LAST_STATUS[device_id] = False
+                                has_failures = True
+                        else:
+                            # Sem internet: manter pendente para sincronizar quando voltar
+                            REFRESH_LAST_STATUS[device_id] = False
+                            has_failures = True
+                    else:
+                        REFRESH_LAST_STATUS[device_id] = True
                 else:
                     REFRESH_FAIL_COUNTS[device_id] = REFRESH_FAIL_COUNTS.get(device_id, 0) + 1
-                    if REFRESH_FAIL_COUNTS.get(device_id, 0) >= DEVICE_REFRESH_FAILURE_THRESHOLD:
-                        log(f"[REFRESH] {device_id} falhou {DEVICE_REFRESH_FAILURE_THRESHOLD}x. Reiniciando servidor...")
-                        os._exit(1)
+                    REFRESH_LAST_STATUS[device_id] = False
+                    has_failures = True
             except Exception as e:
                 log(f"[REFRESH] Erro ao refrescar {device_id}: {e}")
+                REFRESH_LAST_STATUS[device_id] = False
+                has_failures = True
+        return has_failures
     except Exception as e:
         log(f"[REFRESH] Erro geral no refresh: {e}")
+        return True
 
 def start_device_refresh_loop(interval_seconds: int = DEVICE_REFRESH_INTERVAL_SECONDS) -> None:
     """Inicia loop em background para refresh periódico."""
     def refresh_loop():
         while True:
             try:
-                refresh_devices_once()
+                has_failures = refresh_devices_once()
             except Exception as e:
                 log(f"[REFRESH] Erro no loop: {e}")
-            time.sleep(interval_seconds)
+                has_failures = True
+            sleep_seconds = (
+                DEVICE_REFRESH_RETRY_ON_FAILURE_SECONDS
+                if has_failures
+                else interval_seconds
+            )
+            time.sleep(sleep_seconds)
     
     thread = threading.Thread(target=refresh_loop, daemon=True)
     thread.start()
-    log(f"[REFRESH] Loop iniciado (intervalo: {interval_seconds}s)")
+    log(
+        f"[REFRESH] Loop iniciado (intervalo normal: {interval_seconds}s, "
+        f"retry em falha: {DEVICE_REFRESH_RETRY_ON_FAILURE_SECONDS}s)"
+    )
 
 def send_tuya_command(
     action: str,
