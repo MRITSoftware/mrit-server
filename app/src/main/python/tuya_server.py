@@ -664,22 +664,20 @@ def update_device_heartbeat(
             log(f"[HEARTBEAT] IP ou local_key não disponíveis para ping (IP: {lan_ip}, Key: {'presente' if local_key else 'ausente'})")
             # Continuar mesmo sem ping - atualizar banco para indicar que servidor está online
         
-        if lan_ip and local_key and not device_online:
-            log("[HEARTBEAT] Placa não respondeu ao ping - servidor_online não atualizado")
-            return False
-        
-        # Atualizar servidor_online com timestamp atual (formato ISO 8601 UTC)
-        # Usar timezone UTC para timestamp consistente
-        # Formato: YYYY-MM-DDTHH:MM:SS.ffffff+00:00 (ISO 8601 com timezone)
+        # Preparar dados para atualização
+        # Regra:
+        # - servidor_online só é atualizado se a placa respondeu OK OU se não há lan_ip/local_key
+        # - métricas (bateria/velocidade) são sempre atualizadas quando enviadas, mesmo se status falhar
         now_utc = datetime.now(timezone.utc)
-        # Formatar explicitamente para garantir compatibilidade com timestampz do PostgreSQL
         timestamp_iso = now_utc.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "+00:00"
         
-        # Atualizar usando Supabase REST API
         url = f"{base_url}/tuya_devices?tuya_device_id=eq.{tuya_device_id}"
         
-        # Atualizar servidor_online com timestamp atual e métricas opcionais
-        update_data = {"servidor_online": timestamp_iso}
+        update_data: Dict[str, Any] = {}
+        
+        # Atualizar servidor_online apenas se considerarmos o device online
+        if (not lan_ip or not local_key) or device_online:
+            update_data["servidor_online"] = timestamp_iso
         
         # Adicionar métricas opcionais se fornecidas
         if battery_level is not None:
@@ -709,6 +707,11 @@ def update_device_heartbeat(
             metrics_info.append(f"velocidade={wifi_speed_int} Mbps")
         
         metrics_str = f", {', '.join(metrics_info)}" if metrics_info else ""
+        
+        # Se não houver nada para atualizar, sair sem erro
+        if not update_data:
+            log(f"[HEARTBEAT] Nenhum campo para atualizar para device {tuya_device_id} (placa_online={device_online})")
+            return False
         log(f"[HEARTBEAT] Atualizando servidor_online para device {tuya_device_id} (timestamp: {timestamp_iso}, placa online: {device_online}{metrics_str})")
         
         # Usar PATCH com Prefer: return=minimal para não retornar dados
