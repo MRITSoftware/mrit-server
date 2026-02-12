@@ -56,7 +56,7 @@ object HeartbeatService {
             // é chamado por diferentes pontos do app quase ao mesmo tempo.
             WorkManager.getInstance(context).enqueueUniqueWork(
                 IMMEDIATE_WORK_NAME,
-                ExistingWorkPolicy.REPLACE,
+                ExistingWorkPolicy.KEEP,
                 immediateHeartbeat
             )
             

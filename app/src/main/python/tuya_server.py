@@ -306,6 +306,7 @@ log(f"[INFO] Servidor local iniciado para SITE = {SITE_NAME}")
 # =========================
 
 HEARTBEAT_LOG_TABLE = "tuya_heartbeat_logs"
+HEARTBEAT_LOG_DEDUP_SECONDS = 60
 
 def get_supabase_headers():
     """Retorna headers para requisições ao Supabase."""
@@ -457,6 +458,44 @@ def insert_heartbeat_ok_log(
         url = f"{base_url}/{HEARTBEAT_LOG_TABLE}"
         
         now_utc = datetime.now(timezone.utc)
+        
+        # Evita múltiplos inserts iguais em rajada para o mesmo device/site.
+        if tuya_device_id:
+            params = {
+                "select": "event_time",
+                "tuya_device_id": f"eq.{tuya_device_id}",
+                "status": f"eq.{status}",
+                "order": "event_time.desc",
+                "limit": "1"
+            }
+        else:
+            params = {
+                "select": "event_time",
+                "site_id": f"eq.{site_id}",
+                "status": f"eq.{status}",
+                "order": "event_time.desc",
+                "limit": "1"
+            }
+        
+        response_last = requests.get(url, headers=headers, params=params, timeout=15)
+        response_last.raise_for_status()
+        last_data = response_last.json()
+        if last_data and len(last_data) > 0:
+            last_event_time_raw = last_data[0].get("event_time")
+            if last_event_time_raw:
+                try:
+                    last_event_time = datetime.fromisoformat(last_event_time_raw.replace("Z", "+00:00"))
+                    delta_seconds = (now_utc - last_event_time).total_seconds()
+                    if delta_seconds < HEARTBEAT_LOG_DEDUP_SECONDS:
+                        log(
+                            f"[HEARTBEAT_LOG] Ignorado duplicado em janela de {HEARTBEAT_LOG_DEDUP_SECONDS}s "
+                            f"(delta={delta_seconds:.1f}s, site_id={site_id}, device={tuya_device_id})"
+                        )
+                        return True
+                except Exception:
+                    # Se falhar parse do timestamp, segue com insert para não perder evento.
+                    pass
+        
         timestamp_iso = now_utc.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "+00:00"
         
         payload: Dict[str, Any] = {
