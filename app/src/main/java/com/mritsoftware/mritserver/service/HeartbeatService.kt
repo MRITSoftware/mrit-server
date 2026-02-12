@@ -3,6 +3,7 @@ package com.mritsoftware.mritserver.service
 import android.content.Context
 import android.util.Log
 import androidx.work.Constraints
+import androidx.work.ExistingWorkPolicy
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
@@ -18,6 +19,7 @@ object HeartbeatService {
     
     private const val TAG = "HeartbeatService"
     private const val WORK_NAME = "heartbeat_work"
+    private const val IMMEDIATE_WORK_NAME = "heartbeat_work_immediate"
     
     /**
      * Inicia o worker periódico de heartbeat (a cada 15 minutos)
@@ -49,8 +51,14 @@ object HeartbeatService {
                 .addTag(WORK_NAME)
                 .build()
             
-            // Executar imediatamente
-            WorkManager.getInstance(context).enqueue(immediateHeartbeat)
+            // Executar imediatamente como trabalho único.
+            // Isso evita múltiplos heartbeats em paralelo quando startHeartbeat()
+            // é chamado por diferentes pontos do app quase ao mesmo tempo.
+            WorkManager.getInstance(context).enqueueUniqueWork(
+                IMMEDIATE_WORK_NAME,
+                ExistingWorkPolicy.REPLACE,
+                immediateHeartbeat
+            )
             
             // Agendar periódico
             WorkManager.getInstance(context).enqueueUniquePeriodicWork(
@@ -83,6 +91,7 @@ object HeartbeatService {
     fun stopHeartbeat(context: Context) {
         try {
             WorkManager.getInstance(context).cancelUniqueWork(WORK_NAME)
+            WorkManager.getInstance(context).cancelUniqueWork(IMMEDIATE_WORK_NAME)
             Log.d(TAG, "Heartbeat worker cancelado")
         } catch (e: Exception) {
             Log.e(TAG, "Erro ao cancelar heartbeat worker: ${e.message}", e)
