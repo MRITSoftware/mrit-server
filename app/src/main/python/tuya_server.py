@@ -437,6 +437,87 @@ def get_device_site_id_from_db(tuya_device_id: str) -> Optional[str]:
         log(f"[DB] Não foi possível buscar site_id para {tuya_device_id}: {e}")
         return None
 
+def get_device_by_site_id_from_db(site_id: str) -> Optional[Dict[str, Any]]:
+    """Busca um device pelo site_id para permitir atualização da mesma linha quando o código da placa mudar."""
+    if not REQUESTS_AVAILABLE:
+        return None
+    
+    if not SUPABASE_CONFIG.get("url") or not SUPABASE_CONFIG.get("anon_key"):
+        return None
+    
+    try:
+        base_url = get_supabase_url()
+        headers = get_supabase_headers()
+        url = f"{base_url}/tuya_devices?site_id=eq.{site_id}&select=id,tuya_device_id,site_id,name,local_key,lan_ip,protocol_version&limit=1"
+        
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        
+        data = response.json()
+        if data and len(data) > 0:
+            return data[0]
+        return None
+    except Exception as e:
+        log(f"[DB] Não foi possível buscar device por site_id={site_id}: {e}")
+        return None
+
+def update_device_by_id_in_db(
+    device_row_id: str,
+    tuya_device_id: Optional[str] = None,
+    site_id: Optional[str] = None,
+    name: Optional[str] = None,
+    local_key: Optional[str] = None,
+    lan_ip: Optional[str] = None,
+    protocol_version: Optional[str] = None
+) -> bool:
+    """Atualiza um device na tabela tuya_devices usando o id da linha."""
+    if not REQUESTS_AVAILABLE:
+        log("[DB] requests não está disponível")
+        return False
+    
+    if not SUPABASE_CONFIG.get("url") or not SUPABASE_CONFIG.get("anon_key"):
+        log(f"[DB] Configuração do Supabase não encontrada. URL: {SUPABASE_CONFIG.get('url')}, Key: {'presente' if SUPABASE_CONFIG.get('anon_key') else 'ausente'}")
+        return False
+    
+    try:
+        base_url = get_supabase_url()
+        headers = get_supabase_headers()
+        
+        update_data: Dict[str, Any] = {}
+        if tuya_device_id is not None:
+            update_data["tuya_device_id"] = tuya_device_id
+        if site_id is not None:
+            update_data["site_id"] = site_id
+        if name is not None:
+            update_data["name"] = name
+        if local_key is not None:
+            update_data["local_key"] = local_key
+        if lan_ip is not None:
+            update_data["lan_ip"] = lan_ip
+        if protocol_version is not None:
+            update_data["protocol_version"] = protocol_version
+        
+        if not update_data:
+            log(f"[DB] Nenhum dado para atualizar por id={device_row_id}")
+            return False
+        
+        url = f"{base_url}/tuya_devices?id=eq.{device_row_id}"
+        response = requests.patch(url, json=update_data, headers=headers, timeout=30)
+        response.raise_for_status()
+        
+        # Com return=representation, lista vazia indica que a linha não foi encontrada.
+        data = response.json()
+        if data and len(data) > 0:
+            log(f"[DB] Device id={device_row_id} atualizado com sucesso")
+            return True
+        
+        log(f"[DB] Nenhum device encontrado com id={device_row_id}")
+        return False
+    except Exception as e:
+        log(f"[DB] Erro ao atualizar device por id={device_row_id}: {e}")
+        traceback.print_exc()
+        return False
+
 def insert_heartbeat_ok_log(
     site_id: str,
     status: str = "ok",
@@ -1853,6 +1934,14 @@ def api_tuya_command():
             lan_ip=lan_ip,
             version=version_float
         )
+
+        # Registrar no banco apenas quando um comando manual retornar sucesso.
+        site_id = get_device_site_id_from_db(tuya_device_id) or SITE_NAME
+        insert_heartbeat_ok_log(
+            site_id=site_id,
+            status="ok",
+            tuya_device_id=tuya_device_id
+        )
         
         # SALVAR NO CACHE PERSISTENTE sempre que tivermos dados completos
         # Isso garante que nas próximas chamadas não precisaremos enviar tudo novamente
@@ -1957,13 +2046,6 @@ def api_tuya_heartbeat():
         success = update_device_heartbeat(tuya_device_id, battery_level, internet_speed_mbps)
         
         if success:
-            site_id = get_device_site_id_from_db(tuya_device_id) or SITE_NAME
-            insert_heartbeat_ok_log(
-                site_id=site_id,
-                status="ok",
-                tuya_device_id=tuya_device_id
-            )
-            
             response_msg = f"Heartbeat atualizado com sucesso para device {tuya_device_id}"
             if metrics_log:
                 response_msg += f" ({', '.join(metrics_log)})"
@@ -2168,25 +2250,57 @@ def api_sync_devices():
                 else:
                     log(f"[SYNC] Device {tuya_id} já está atualizado")
             else:
-                # Device não existe: CRIAR
-                log(f"[SYNC] Device {tuya_id} não encontrado no banco, criando novo registro...")
+                # Device não encontrado por tuya_device_id.
+                # Tentar reaproveitar a linha do mesmo site_id (código da placa pode ter mudado).
+                reused_by_site = False
+                if site_id_from_body:
+                    existing_by_site = get_device_by_site_id_from_db(site_id_from_body)
+                    if existing_by_site:
+                        old_tuya_id = existing_by_site.get("tuya_device_id")
+                        row_id = existing_by_site.get("id")
+                        log(f"[SYNC] Device {tuya_id} não encontrado por código; atualizando linha existente do site_id={site_id_from_body} (tuya antigo={old_tuya_id})")
+                        
+                        success = update_device_by_id_in_db(
+                            device_row_id=str(row_id),
+                            tuya_device_id=tuya_id,
+                            site_id=site_id_from_body,
+                            name=name_from_body or site_id_from_body,
+                            local_key=local_key_from_body,
+                            lan_ip=lan_ip,
+                            protocol_version=protocol_version
+                        )
+                        
+                        if success:
+                            updated_count += 1
+                            updated_devices.append({
+                                "tuya_device_id": tuya_id,
+                                "action": "updated_by_site_id",
+                                "old_tuya_device_id": old_tuya_id,
+                                "site_id": site_id_from_body
+                            })
+                            reused_by_site = True
+                            log(f"[SYNC] Linha do site_id={site_id_from_body} atualizada com novo tuya_device_id={tuya_id}")
                 
-                success = create_device_in_db(
-                    tuya_device_id=tuya_id,
-                    site_id=site_id_from_body,
-                    name=name_from_body or site_id_from_body,  # Garantir que name seja preenchido
-                    local_key=local_key_from_body,
-                    lan_ip=lan_ip,
-                    protocol_version=protocol_version
-                )
-                
-                if success:
-                    created_count += 1
-                    created_devices.append({
-                        "tuya_device_id": tuya_id,
-                        "action": "created"
-                    })
-                    log(f"[SYNC] Device {tuya_id} criado com sucesso")
+                if not reused_by_site:
+                    # Sem correspondência por site_id: criar novo registro normalmente.
+                    log(f"[SYNC] Device {tuya_id} não encontrado no banco, criando novo registro...")
+                    
+                    success = create_device_in_db(
+                        tuya_device_id=tuya_id,
+                        site_id=site_id_from_body,
+                        name=name_from_body or site_id_from_body,  # Garantir que name seja preenchido
+                        local_key=local_key_from_body,
+                        lan_ip=lan_ip,
+                        protocol_version=protocol_version
+                    )
+                    
+                    if success:
+                        created_count += 1
+                        created_devices.append({
+                            "tuya_device_id": tuya_id,
+                            "action": "created"
+                        })
+                        log(f"[SYNC] Device {tuya_id} criado com sucesso")
         
         total_processed = updated_count + created_count
         log(f"[SYNC] Sincronização concluída: {updated_count} atualizados, {created_count} criados")
