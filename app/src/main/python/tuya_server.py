@@ -305,6 +305,8 @@ log(f"[INFO] Servidor local iniciado para SITE = {SITE_NAME}")
 # DATABASE (SUPABASE)
 # =========================
 
+HEARTBEAT_LOG_TABLE = "tuya_heartbeat_logs"
+
 def get_supabase_headers():
     """Retorna headers para requisições ao Supabase."""
     if not REQUESTS_AVAILABLE:
@@ -409,6 +411,71 @@ def get_devices_from_db(tuya_device_ids: List[str]) -> Dict[str, Dict]:
             return {}
     
     return {}
+
+def get_device_site_id_from_db(tuya_device_id: str) -> Optional[str]:
+    """Busca o site_id de um device no banco."""
+    if not REQUESTS_AVAILABLE:
+        return None
+    
+    if not SUPABASE_CONFIG.get("url") or not SUPABASE_CONFIG.get("anon_key"):
+        return None
+    
+    try:
+        base_url = get_supabase_url()
+        headers = get_supabase_headers()
+        url = f"{base_url}/tuya_devices?tuya_device_id=eq.{tuya_device_id}&select=site_id&limit=1"
+        
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        
+        data = response.json()
+        if data and len(data) > 0:
+            return data[0].get("site_id")
+        return None
+    except Exception as e:
+        log(f"[DB] Não foi possível buscar site_id para {tuya_device_id}: {e}")
+        return None
+
+def insert_heartbeat_ok_log(
+    site_id: str,
+    status: str = "ok",
+    tuya_device_id: Optional[str] = None
+) -> bool:
+    """
+    Insere evento de heartbeat em tabela dedicada para monitoramento.
+    Não interrompe o fluxo principal em caso de erro.
+    """
+    if not REQUESTS_AVAILABLE:
+        return False
+    
+    if not SUPABASE_CONFIG.get("url") or not SUPABASE_CONFIG.get("anon_key"):
+        return False
+    
+    try:
+        base_url = get_supabase_url()
+        headers = get_supabase_headers()
+        url = f"{base_url}/{HEARTBEAT_LOG_TABLE}"
+        
+        now_utc = datetime.now(timezone.utc)
+        timestamp_iso = now_utc.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "+00:00"
+        
+        payload: Dict[str, Any] = {
+            "site_id": site_id,
+            "status": status,
+            "event_time": timestamp_iso
+        }
+        if tuya_device_id:
+            payload["tuya_device_id"] = tuya_device_id
+        
+        response = requests.post(url, json=payload, headers=headers, timeout=15)
+        response.raise_for_status()
+        
+        log(f"[HEARTBEAT_LOG] Evento gravado para site_id={site_id}, status={status}")
+        return True
+    except Exception as e:
+        # O log em tabela auxiliar não deve quebrar o endpoint principal.
+        log(f"[HEARTBEAT_LOG] Falha ao gravar evento em {HEARTBEAT_LOG_TABLE}: {e}")
+        return False
 
 def create_device_in_db(
     tuya_device_id: str,
@@ -1851,6 +1918,13 @@ def api_tuya_heartbeat():
         success = update_device_heartbeat(tuya_device_id, battery_level, internet_speed_mbps)
         
         if success:
+            site_id = get_device_site_id_from_db(tuya_device_id) or SITE_NAME
+            insert_heartbeat_ok_log(
+                site_id=site_id,
+                status="ok",
+                tuya_device_id=tuya_device_id
+            )
+            
             response_msg = f"Heartbeat atualizado com sucesso para device {tuya_device_id}"
             if metrics_log:
                 response_msg += f" ({', '.join(metrics_log)})"
