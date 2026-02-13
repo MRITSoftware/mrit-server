@@ -86,6 +86,7 @@ except ImportError:
 
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 DEVICES_CACHE_PATH = os.path.join(BASE_DIR, "devices_cache.json")
+PENDING_HEARTBEAT_LOGS_PATH = os.path.join(BASE_DIR, "pending_heartbeat_logs.json")
 
 def load_config_from_env() -> Dict[str, Any]:
     """Carrega configurações de variáveis de ambiente."""
@@ -306,6 +307,7 @@ log(f"[INFO] Servidor local iniciado para SITE = {SITE_NAME}")
 # =========================
 
 HEARTBEAT_LOG_TABLE = "tuya_heartbeat_logs"
+PENDING_HEARTBEAT_LOGS_LOCK = threading.Lock()
 
 def get_supabase_headers():
     """Retorna headers para requisições ao Supabase."""
@@ -517,18 +519,45 @@ def update_device_by_id_in_db(
         traceback.print_exc()
         return False
 
-def insert_heartbeat_ok_log(
-    site_id: str,
-    status: str = "ok",
-    tuya_device_id: Optional[str] = None
-) -> bool:
-    """
-    Insere evento de heartbeat em tabela dedicada para monitoramento.
-    Não interrompe o fluxo principal em caso de erro.
-    """
+def load_pending_heartbeat_logs() -> List[Dict[str, Any]]:
+    """Carrega a fila local de logs pendentes."""
+    if not os.path.exists(PENDING_HEARTBEAT_LOGS_PATH):
+        return []
+    try:
+        with open(PENDING_HEARTBEAT_LOGS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return [row for row in data if isinstance(row, dict)]
+        return []
+    except Exception as e:
+        log(f"[HEARTBEAT_LOG] Erro ao carregar fila local: {e}")
+        return []
+
+def save_pending_heartbeat_logs(rows: List[Dict[str, Any]]) -> None:
+    """Salva a fila local de logs pendentes."""
+    with open(PENDING_HEARTBEAT_LOGS_PATH, "w", encoding="utf-8") as f:
+        json.dump(rows, f, indent=2, ensure_ascii=False)
+
+def enqueue_pending_heartbeat_log(payload: Dict[str, Any]) -> bool:
+    """Adiciona um evento na fila local quando não for possível enviar ao banco."""
+    try:
+        with PENDING_HEARTBEAT_LOGS_LOCK:
+            pending = load_pending_heartbeat_logs()
+            pending.append(payload)
+            save_pending_heartbeat_logs(pending)
+        log(
+            f"[HEARTBEAT_LOG] Evento enfileirado localmente "
+            f"(site_id={payload.get('site_id')}, device={payload.get('tuya_device_id')}, event_time={payload.get('event_time')})"
+        )
+        return True
+    except Exception as e:
+        log(f"[HEARTBEAT_LOG] Falha ao enfileirar evento local: {e}")
+        return False
+
+def send_heartbeat_log_payload(payload: Dict[str, Any]) -> bool:
+    """Envia payload de log para o Supabase mantendo o event_time original."""
     if not REQUESTS_AVAILABLE:
         return False
-    
     if not SUPABASE_CONFIG.get("url") or not SUPABASE_CONFIG.get("anon_key"):
         return False
     
@@ -537,26 +566,80 @@ def insert_heartbeat_ok_log(
         headers = get_supabase_headers()
         url = f"{base_url}/{HEARTBEAT_LOG_TABLE}"
         
-        now_utc = datetime.now(timezone.utc)
-        timestamp_iso = now_utc.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "+00:00"
-        
-        payload: Dict[str, Any] = {
-            "site_id": site_id,
-            "status": status,
-            "event_time": timestamp_iso
-        }
-        if tuya_device_id:
-            payload["tuya_device_id"] = tuya_device_id
-        
         response = requests.post(url, json=payload, headers=headers, timeout=15)
         response.raise_for_status()
-        
-        log(f"[HEARTBEAT_LOG] Evento gravado para site_id={site_id}, status={status}")
         return True
     except Exception as e:
-        # O log em tabela auxiliar não deve quebrar o endpoint principal.
-        log(f"[HEARTBEAT_LOG] Falha ao gravar evento em {HEARTBEAT_LOG_TABLE}: {e}")
+        log(f"[HEARTBEAT_LOG] Falha ao enviar payload para {HEARTBEAT_LOG_TABLE}: {e}")
         return False
+
+def flush_pending_heartbeat_logs(max_items: int = 200) -> int:
+    """Tenta enviar eventos pendentes salvos localmente."""
+    if max_items <= 0:
+        return 0
+    if not REQUESTS_AVAILABLE:
+        return 0
+    if not SUPABASE_CONFIG.get("url") or not SUPABASE_CONFIG.get("anon_key"):
+        return 0
+    
+    with PENDING_HEARTBEAT_LOGS_LOCK:
+        pending = load_pending_heartbeat_logs()
+        if not pending:
+            return 0
+        
+        sent_count = 0
+        remaining: List[Dict[str, Any]] = []
+        
+        for idx, payload in enumerate(pending):
+            if sent_count >= max_items:
+                remaining.extend(pending[idx:])
+                break
+            
+            if send_heartbeat_log_payload(payload):
+                sent_count += 1
+            else:
+                # Mantém ordem e tenta novamente no próximo ciclo.
+                remaining.extend(pending[idx:])
+                break
+        
+        save_pending_heartbeat_logs(remaining)
+    
+    if sent_count > 0:
+        log(f"[HEARTBEAT_LOG] Reenvio concluído: {sent_count} evento(s) pendente(s) enviado(s)")
+    return sent_count
+
+def insert_heartbeat_ok_log(
+    site_id: str,
+    status: str = "ok",
+    tuya_device_id: Optional[str] = None,
+    event_time_iso: Optional[str] = None
+) -> bool:
+    """
+    Insere evento em tabela dedicada para monitoramento.
+    Se não conseguir enviar, salva localmente mantendo event_time original.
+    """
+    if event_time_iso:
+        timestamp_iso = event_time_iso
+    else:
+        now_utc = datetime.now(timezone.utc)
+        timestamp_iso = now_utc.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "+00:00"
+    
+    payload: Dict[str, Any] = {
+        "site_id": site_id,
+        "status": status,
+        "event_time": timestamp_iso
+    }
+    if tuya_device_id:
+        payload["tuya_device_id"] = tuya_device_id
+    
+    if send_heartbeat_log_payload(payload):
+        log(f"[HEARTBEAT_LOG] Evento gravado para site_id={site_id}, status={status}, event_time={timestamp_iso}")
+        # Tenta reenvio de pendências junto com um envio bem-sucedido.
+        flush_pending_heartbeat_logs(max_items=50)
+        return True
+    
+    # O log em tabela auxiliar não deve quebrar o endpoint principal.
+    return enqueue_pending_heartbeat_log(payload)
 
 def create_device_in_db(
     tuya_device_id: str,
@@ -1406,6 +1489,10 @@ def has_internet_connection(timeout_seconds: float = 2.0) -> bool:
 def refresh_devices_once() -> bool:
     """Faz um refresh (status) nos dispositivos cacheados para manter a conexão ativa."""
     try:
+        internet_ok = has_internet_connection()
+        if internet_ok:
+            flush_pending_heartbeat_logs(max_items=200)
+        
         cache = load_devices_cache()
         device_ids = [k for k in cache.keys() if not k.startswith("_")]
         if not device_ids:
@@ -1414,7 +1501,6 @@ def refresh_devices_once() -> bool:
         
         log(f"[REFRESH] Iniciando refresh de {len(device_ids)} dispositivo(s)")
         has_failures = False
-        internet_ok = has_internet_connection()
         for device_id in device_ids:
             device_data = cache.get(device_id) or {}
             lan_ip = device_data.get("lan_ip")
@@ -1777,6 +1863,10 @@ def api_tuya_command():
         if data is None:
             return jsonify({"ok": False, "error": "JSON inválido"}), 400
         
+        # Preservar exatamente o horário de recebimento do comando.
+        command_received_utc = datetime.now(timezone.utc)
+        command_received_iso = command_received_utc.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "+00:00"
+        
         action = data.get("action")
         tuya_device_id = data.get("tuya_device_id")
         local_key = data.get("local_key")
@@ -1901,7 +1991,8 @@ def api_tuya_command():
         insert_heartbeat_ok_log(
             site_id=site_id,
             status="ok",
-            tuya_device_id=tuya_device_id
+            tuya_device_id=tuya_device_id,
+            event_time_iso=command_received_iso
         )
         
         # SALVAR NO CACHE PERSISTENTE sempre que tivermos dados completos
