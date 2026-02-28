@@ -73,6 +73,10 @@ DEFAULT_TUYA_ACCOUNTS = [
 # Refresh periódico para manter comunicação com a placa
 DEVICE_REFRESH_INTERVAL_SECONDS = 5 * 60  # 5 minutos
 DEVICE_REFRESH_RETRY_ON_FAILURE_SECONDS = 60  # 1 minuto quando houver falha
+COMMAND_MAX_RETRIES = 3
+COMMAND_RETRY_DELAY_SECONDS = 1
+COMMAND_PREFLIGHT_TIMEOUT_SECONDS = 8
+COMMAND_ACTION_TIMEOUT_SECONDS = 20
 REFRESH_FAIL_COUNTS: Dict[str, int] = {}
 REFRESH_LAST_STATUS: Dict[str, bool] = {}
 
@@ -1621,6 +1625,9 @@ def send_tuya_command(
         lan_ip = discover_tuya_ip(tuya_device_id)
         if not lan_ip:
             raise RuntimeError("Não foi possível descobrir o IP LAN do dispositivo Tuya.")
+        # armazenar cache para próxima vez
+        with DEVICE_CACHE_LOCK:
+            DEVICE_CACHE[tuya_device_id] = lan_ip
     
     # Garante que venha só IP, nada de 'http://'
     lan_ip = str(lan_ip).strip()
@@ -1646,46 +1653,43 @@ def send_tuya_command(
     
     # Preflight: verificar se a placa responde antes do comando
     preflight_device = create_device(lan_ip)
-    preflight_status = tuya_status_with_timeout(preflight_device, timeout_seconds=8)
+    preflight_status = tuya_status_with_timeout(preflight_device, timeout_seconds=COMMAND_PREFLIGHT_TIMEOUT_SECONDS)
     if not preflight_status:
         log(f"[INFO] Preflight falhou para {tuya_device_id} @ {lan_ip}. Tentando redescobrir IP...")
         discovered_ip = discover_tuya_ip(tuya_device_id)
         if discovered_ip:
             lan_ip = discovered_ip
             log(f"[INFO] IP redescoberto: {lan_ip}")
-        else:
-            log("[INFO] Não foi possível redescobrir IP no preflight")
+            # atualizar cache após redescoberta
+            with DEVICE_CACHE_LOCK:
+                DEVICE_CACHE[tuya_device_id] = lan_ip
     
-    # Retry automático: 4 tentativas
-    max_retries = 4
-    last_error = None
-    
-    for attempt in range(1, max_retries + 1):
+    last_error: Optional[Exception] = None
+    for attempt in range(1, COMMAND_MAX_RETRIES + 1):
         try:
             if attempt > 1:
-                log(f"[INFO] Tentativa {attempt}/{max_retries} para enviar comando '{action}'")
-                # Pequeno delay entre tentativas (1 segundo)
-                time.sleep(1)
+                log(f"[INFO] Tentativa {attempt}/{COMMAND_MAX_RETRIES} para enviar comando '{action}'")
+                time.sleep(COMMAND_RETRY_DELAY_SECONDS)
             
             d = create_device(lan_ip)
             
             # Usar função com timeout aumentado para 20s
-            resp = tuya_command_with_timeout(d, action, timeout_seconds=20)
+            resp = tuya_command_with_timeout(d, action, timeout_seconds=COMMAND_ACTION_TIMEOUT_SECONDS)
             
             if resp is None:
                 # Timeout - tentar novamente se ainda houver tentativas
-                if attempt < max_retries:
+                if attempt < COMMAND_MAX_RETRIES:
                     log(f"[INFO] Timeout na tentativa {attempt}, tentando novamente...")
                     last_error = RuntimeError("Timeout ao enviar comando para dispositivo")
                     continue
                 else:
                     # Última tentativa falhou - limpar cache apenas se todas falharam
-                    log(f"[INFO] Todas as {max_retries} tentativas falharam por timeout")
+                    log(f"[INFO] Todas as {COMMAND_MAX_RETRIES} tentativas falharam por timeout")
                     with DEVICE_CACHE_LOCK:
                         if tuya_device_id in DEVICE_CACHE:
-                            log(f"[INFO] Limpando cache de IP para {tuya_device_id} devido a timeout após {max_retries} tentativas")
+                            log(f"[INFO] Limpando cache de IP para {tuya_device_id} devido a timeout após {COMMAND_MAX_RETRIES} tentativas")
                             del DEVICE_CACHE[tuya_device_id]
-                    raise RuntimeError(f"Timeout ao enviar comando para dispositivo após {max_retries} tentativas")
+                    raise RuntimeError(f"Timeout ao enviar comando para dispositivo após {COMMAND_MAX_RETRIES} tentativas")
             
             # Sucesso!
             log(f"[DEBUG] Resposta do dispositivo: {resp}")
@@ -1695,10 +1699,10 @@ def send_tuya_command(
         
         except Exception as e:
             last_error = e
-            log(f"[INFO] Erro na tentativa {attempt}/{max_retries}: {e}")
+            log(f"[INFO] Erro na tentativa {attempt}/{COMMAND_MAX_RETRIES}: {e}")
             
             # Se não for a última tentativa, continuar
-            if attempt < max_retries:
+            if attempt < COMMAND_MAX_RETRIES:
                 log(f"[INFO] Tentando novamente...")
                 # Tentar redescobrir IP antes da próxima tentativa
                 discovered_ip = discover_tuya_ip(tuya_device_id)
@@ -1708,12 +1712,12 @@ def send_tuya_command(
                 continue
             else:
                 # Última tentativa falhou - limpar cache apenas se todas falharam
-                log(f"[INFO] Todas as {max_retries} tentativas falharam")
+                log(f"[INFO] Todas as {COMMAND_MAX_RETRIES} tentativas falharam")
                 with DEVICE_CACHE_LOCK:
                     if tuya_device_id in DEVICE_CACHE:
-                        log(f"[INFO] Limpando cache de IP para {tuya_device_id} devido a erro após {max_retries} tentativas")
+                        log(f"[INFO] Limpando cache de IP para {tuya_device_id} devido a erro após {COMMAND_MAX_RETRIES} tentativas")
                         del DEVICE_CACHE[tuya_device_id]
-                raise RuntimeError(f"Erro ao enviar comando para dispositivo após {max_retries} tentativas: {e}")
+                raise RuntimeError(f"Erro ao enviar comando para dispositivo após {COMMAND_MAX_RETRIES} tentativas: {e}")
     
     # Se chegou aqui, todas as tentativas falharam
     if last_error:
@@ -2029,6 +2033,10 @@ def api_tuya_command():
         
         return jsonify(response_data), 200
     
+    except RuntimeError as e:
+        err = str(e)
+        log(f"[ERRO] API /tuya/command (runtime): {err}")
+        return jsonify({"ok": False, "error": err, "retriable": True}), 503
     except Exception as e:
         err = str(e)
         log(f"[ERRO] API /tuya/command: {err}")
