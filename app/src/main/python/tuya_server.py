@@ -804,6 +804,41 @@ def tuya_status_with_timeout(device: Any, timeout_seconds: int = 20) -> Optional
     
     return result[0]
 
+def normalize_tuya_power_value(value: Any) -> Optional[bool]:
+    """Converte valores comuns do status Tuya em ligado/desligado."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("true", "on", "1"):
+            return True
+        if normalized in ("false", "off", "0"):
+            return False
+    return None
+
+def extract_tuya_power_state(status_payload: Any) -> Optional[bool]:
+    """Tenta extrair do payload de status se a placa está ligada."""
+    if not isinstance(status_payload, dict):
+        return None
+
+    dps = status_payload.get("dps")
+    if isinstance(dps, dict):
+        for key in ("1", 1, "switch", "switch_1", "20"):
+            if key in dps:
+                parsed = normalize_tuya_power_value(dps.get(key))
+                if parsed is not None:
+                    return parsed
+
+    for key in ("switch", "switch_1", "power", "is_on", "on"):
+        if key in status_payload:
+            parsed = normalize_tuya_power_value(status_payload.get(key))
+            if parsed is not None:
+                return parsed
+
+    return None
+
 def tuya_command_with_timeout(device: Any, action: str, timeout_seconds: int = 20) -> Optional[Dict]:
     """Executa turn_on() ou turn_off() com timeout para evitar travamentos."""
     result = [None]
@@ -1733,11 +1768,25 @@ def send_tuya_command(
                             del DEVICE_CACHE[tuya_device_id]
                     raise RuntimeError(f"Timeout ao enviar comando para dispositivo após {COMMAND_MAX_RETRIES} tentativas")
             
-            # Sucesso!
+            post_status = tuya_status_with_timeout(d, timeout_seconds=COMMAND_PREFLIGHT_TIMEOUT_SECONDS)
+            desired_state = action == "on"
+            actual_state = extract_tuya_power_state(post_status)
+            if actual_state is None:
+                raise RuntimeError("Não foi possível confirmar o estado final da placa após o comando")
+            if actual_state != desired_state:
+                raise RuntimeError(
+                    f"Comando enviado, mas a placa continuou {'ligada' if actual_state else 'desligada'}"
+                )
+
+            # Sucesso com confirmação do estado final.
             log(f"[DEBUG] Resposta do dispositivo: {resp}")
+            log(f"[DEBUG] Status confirmado após comando: {post_status}")
             if attempt > 1:
                 log(f"[INFO] Comando enviado com sucesso na tentativa {attempt}")
-            return  # Comando enviado com sucesso, sair da função
+            return {
+                "command_response": resp,
+                "confirmed_status": post_status,
+            }
         
         except Exception as e:
             last_error = e
@@ -2005,7 +2054,7 @@ def execute_tuya_command_request(data: Dict[str, Any], command_received_iso: Opt
 
     version_float = float(version) if version is not None else None
 
-    send_tuya_command(
+    command_result = send_tuya_command(
         action=action,
         tuya_device_id=tuya_device_id,
         local_key=local_key,
@@ -2038,7 +2087,9 @@ def execute_tuya_command_request(data: Dict[str, Any], command_received_iso: Opt
             "id": tuya_device_id,
             "ip": str(lan_ip) if lan_ip else "",
             "version": str(version_float) if version_float else ""
-        }
+        },
+        "command_result": command_result.get("command_response") if isinstance(command_result, dict) else None,
+        "device_status": command_result.get("confirmed_status") if isinstance(command_result, dict) else None,
     }
 
     if used_fallback:
@@ -2380,7 +2431,7 @@ def process_remote_command_record(record: Dict[str, Any]) -> None:
         response_data = execute_remote_command_action(record)
         if action in ("on", "off"):
             update_remote_command_status(command_id, "done", result=response_data)
-            delete_remote_command(command_id)
+            log(f"[REMOTE] Comando {command_id} mantido na tabela para diagnósticos")
         elif action == "test":
             save_single_test_command_result(
                 command_id=command_id,

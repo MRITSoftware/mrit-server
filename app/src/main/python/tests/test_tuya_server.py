@@ -105,21 +105,21 @@ def test_send_command_success(monkeypatch):
     monkeypatch.setattr('tinytuya.OutletDevice', fake_outlet)
 
     # with explicit lan_ip
-    send_tuya_command('on', 'ID123', 'localkey', '192.168.1.10', version=3.3)
+    result = send_tuya_command('on', 'ID123', 'localkey', '192.168.1.10', version=3.3)
+    assert result["confirmed_status"] == {'dps': {'1': True}}
+    assert result["command_response"] == {'result': 'ok'}
 
 
 def test_send_command_autodiscover_and_retry(monkeypatch):
     # first status call will return None (timeout), second will succeed
     class StatefulDevice(DummyDevice):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self.call_count = 0
+        status_call_count = 0
 
         def status(self):
-            self.call_count += 1
-            if self.call_count == 1:
+            type(self).status_call_count += 1
+            if type(self).status_call_count == 1:
                 return None
-            return {'dps': {'1': False}}
+            return {'dps': {'1': True}}
 
         def turn_on(self):
             return {'result': 'ok'}
@@ -180,6 +180,31 @@ def test_send_command_retries_up_to_configured_limit(monkeypatch):
 
     assert str(exc_info.value).startswith("Erro ao enviar comando para dispositivo")
     assert call_count["turn_on"] == COMMAND_MAX_RETRIES
+
+
+def test_send_command_requires_confirmed_final_state(monkeypatch):
+    class MismatchDevice(DummyDevice):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.status_calls = 0
+
+        def status(self):
+            self.status_calls += 1
+            if self.status_calls == 1:
+                return {"dps": {"1": False}}
+            return {"dps": {"1": False}}
+
+        def turn_on(self):
+            return {"result": "ok"}
+
+    monkeypatch.setattr('tinytuya.OutletDevice', lambda *args, **kwargs: MismatchDevice(args[0], args[1], args[2], {}))
+    monkeypatch.setattr('tuya_server.discover_tuya_ip', lambda dev: '1.2.3.4')
+    monkeypatch.setattr('time.sleep', lambda _: None)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        send_tuya_command('on', 'ID123', 'localkey', '1.2.3.4')
+
+    assert "placa continuou desligada" in str(exc_info.value)
 
 
 def test_api_command_runtime_error_returns_503(monkeypatch):
@@ -255,7 +280,6 @@ def test_create_device_reuses_existing_site_id(monkeypatch):
 
 def test_remote_command_processes_pending_command(monkeypatch):
     updates = []
-    deleted = []
 
     monkeypatch.setattr('tuya_server.SITE_NAME', 'ACADEMIA_CENTRO')
     monkeypatch.setattr('tuya_server.claim_remote_command', lambda command_id: True)
@@ -272,7 +296,6 @@ def test_remote_command_processes_pending_command(monkeypatch):
             "error_message": error_message,
         }) or True
     )
-    monkeypatch.setattr('tuya_server.delete_remote_command', lambda command_id: deleted.append(command_id) or True)
 
     process_remote_command_record({
         "id": 7,
@@ -288,7 +311,6 @@ def test_remote_command_processes_pending_command(monkeypatch):
         "result": {"ok": True, "device": {"id": "DEV123", "ip": "", "version": ""}},
         "error_message": None,
     }]
-    assert deleted == [7]
 
 
 def test_remote_test_action_runs_diagnostics(monkeypatch):
