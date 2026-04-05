@@ -14,6 +14,10 @@ from tuya_server import (
     COMMAND_MAX_RETRIES,
     DEVICE_CACHE,
     DEVICE_CACHE_LOCK,
+    create_device_in_db,
+    process_remote_command_record,
+    update_device_in_db,
+    execute_remote_command_action,
 )
 
 class DummyDevice:
@@ -197,3 +201,195 @@ def test_api_command_runtime_error_returns_503(monkeypatch):
     assert response.status_code == 503
     assert payload["ok"] is False
     assert payload["retriable"] is True
+
+
+def test_create_device_reuses_existing_site_id(monkeypatch):
+    post_called = {"value": False}
+    updated_payload = {}
+
+    monkeypatch.setattr(
+        'tuya_server.get_device_by_site_id_from_db',
+        lambda site_id: {
+            "id": "42",
+            "tuya_device_id": "OLD123",
+            "site_id": site_id,
+        },
+    )
+
+    def fake_update_by_id(device_row_id, tuya_device_id=None, site_id=None, name=None, local_key=None, lan_ip=None, protocol_version=None):
+        updated_payload.update({
+            "device_row_id": device_row_id,
+            "tuya_device_id": tuya_device_id,
+            "site_id": site_id,
+            "name": name,
+            "local_key": local_key,
+            "lan_ip": lan_ip,
+            "protocol_version": protocol_version,
+        })
+        return True
+
+    monkeypatch.setattr('tuya_server.update_device_by_id_in_db', fake_update_by_id)
+    monkeypatch.setattr('tuya_server.requests.post', lambda *args, **kwargs: post_called.update(value=True))
+
+    ok = create_device_in_db(
+        tuya_device_id="NEW456",
+        site_id="ACADEMIA_CENTRO",
+        name="Academia Centro",
+        local_key="local-key",
+        lan_ip="192.168.0.10",
+        protocol_version="3.3",
+    )
+
+    assert ok is True
+    assert post_called["value"] is False
+    assert updated_payload == {
+        "device_row_id": "42",
+        "tuya_device_id": "NEW456",
+        "site_id": "ACADEMIA_CENTRO",
+        "name": "Academia Centro",
+        "local_key": "local-key",
+        "lan_ip": "192.168.0.10",
+        "protocol_version": "3.3",
+    }
+
+
+def test_remote_command_processes_pending_command(monkeypatch):
+    updates = []
+    deleted = []
+
+    monkeypatch.setattr('tuya_server.SITE_NAME', 'ACADEMIA_CENTRO')
+    monkeypatch.setattr('tuya_server.claim_remote_command', lambda command_id: True)
+    monkeypatch.setattr(
+        'tuya_server.execute_tuya_command_request',
+        lambda payload: {"ok": True, "device": {"id": payload.get("tuya_device_id"), "ip": "", "version": ""}},
+    )
+    monkeypatch.setattr(
+        'tuya_server.update_remote_command_status',
+        lambda command_id, status, result=None, error_message=None: updates.append({
+            "command_id": command_id,
+            "status": status,
+            "result": result,
+            "error_message": error_message,
+        }) or True
+    )
+    monkeypatch.setattr('tuya_server.delete_remote_command', lambda command_id: deleted.append(command_id) or True)
+
+    process_remote_command_record({
+        "id": 7,
+        "site_id": "ACADEMIA_CENTRO",
+        "status": "pending",
+        "action": "on",
+        "tuya_device_id": "DEV123",
+    })
+
+    assert updates == [{
+        "command_id": 7,
+        "status": "done",
+        "result": {"ok": True, "device": {"id": "DEV123", "ip": "", "version": ""}},
+        "error_message": None,
+    }]
+    assert deleted == [7]
+
+
+def test_remote_test_action_runs_diagnostics(monkeypatch):
+    monkeypatch.setattr(
+        'tuya_server.resolve_device_context_for_test',
+        lambda record: {
+            "tuya_device_id": "DEV123",
+            "resolution_source": "request",
+            "local_key": "local-key",
+            "lan_ip": "192.168.0.10",
+            "version": 3.3,
+            "cache_device": {"lan_ip": "192.168.0.10"},
+            "db_device": {"tuya_device_id": "DEV123"},
+        }
+    )
+
+    class TestDevice:
+        def set_version(self, version):
+            self.version = version
+
+    monkeypatch.setattr('tinytuya.OutletDevice', lambda *args, **kwargs: TestDevice())
+    monkeypatch.setattr('tuya_server.tuya_status_with_timeout', lambda device, timeout_seconds=0: {"dps": {"1": True}})
+
+    result = execute_remote_command_action({
+        "action": "test",
+        "tuya_device_id": "DEV123",
+    })
+
+    assert result["action"] == "test"
+    assert result["ok"] is True
+    assert result["checks"]["device_ping_ok"] is True
+    assert result["device"]["id"] == "DEV123"
+
+
+def test_remote_test_overwrites_previous_saved_result(monkeypatch):
+    saved = []
+    deleted = []
+
+    monkeypatch.setattr('tuya_server.SITE_NAME', 'ACADEMIA_CENTRO')
+    monkeypatch.setattr('tuya_server.claim_remote_command', lambda command_id: True)
+    monkeypatch.setattr(
+        'tuya_server.execute_remote_command_action',
+        lambda record: {"ok": True, "action": "test", "site": "ACADEMIA_CENTRO"}
+    )
+    monkeypatch.setattr(
+        'tuya_server.find_existing_saved_test_command',
+        lambda site_id, exclude_command_id: {"id": 3}
+    )
+    monkeypatch.setattr(
+        'tuya_server.update_remote_command_status',
+        lambda command_id, status, result=None, error_message=None: saved.append({
+            "command_id": command_id,
+            "status": status,
+            "result": result,
+            "error_message": error_message,
+        }) or True
+    )
+    monkeypatch.setattr('tuya_server.delete_remote_command', lambda command_id: deleted.append(command_id) or True)
+
+    process_remote_command_record({
+        "id": 8,
+        "site_id": "ACADEMIA_CENTRO",
+        "status": "pending",
+        "action": "test",
+        "tuya_device_id": "DEV123",
+    })
+
+    assert saved == [{
+        "command_id": 3,
+        "status": "done",
+        "result": {"ok": True, "action": "test", "site": "ACADEMIA_CENTRO"},
+        "error_message": None,
+    }]
+    assert deleted == [8]
+
+
+def test_update_device_in_db_always_sends_app_version(monkeypatch):
+    captured = {}
+
+    class DummyResponse:
+        status_code = 200
+        text = "[]"
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return [{"ok": True}]
+
+    def fake_patch(url, json=None, headers=None, timeout=None):
+        captured["url"] = url
+        captured["json"] = json
+        return DummyResponse()
+
+    monkeypatch.setattr('tuya_server.requests.patch', fake_patch)
+
+    ok = update_device_in_db(
+        tuya_device_id="DEV123",
+        lan_ip="192.168.0.10",
+    )
+
+    assert ok is True
+    assert captured["json"]["lan_ip"] == "192.168.0.10"
+    assert captured["json"]["versao"] == "1.0"

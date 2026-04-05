@@ -30,6 +30,7 @@ android {
                 // Usar requests diretamente para chamadas HTTP ao Supabase
                 // Evita dependências problemáticas como pydantic-core que requer maturin (Rust)
                 install "requests"
+                install "websocket-client"
                 install "tuya-connector-python"
             }
         }

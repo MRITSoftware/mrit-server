@@ -8,7 +8,7 @@ import time
 import socket
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 from flask import Flask, request, jsonify
 import tinytuya
@@ -46,6 +46,13 @@ except ImportError:
     TUYA_CONNECTOR_AVAILABLE = False
     log("[WARN] tuya-connector-python não disponível - busca de local_key desabilitada")
 
+
+try:
+    import websocket
+    WEBSOCKET_CLIENT_AVAILABLE = True
+except ImportError:
+    WEBSOCKET_CLIENT_AVAILABLE = False
+    log("[WARN] websocket-client n?o dispon?vel - comandos remotos em tempo real desabilitados")
 # =========================
 # CONFIG & AUTO-SETUP
 # =========================
@@ -79,6 +86,7 @@ COMMAND_PREFLIGHT_TIMEOUT_SECONDS = 8
 COMMAND_ACTION_TIMEOUT_SECONDS = 20
 REFRESH_FAIL_COUNTS: Dict[str, int] = {}
 REFRESH_LAST_STATUS: Dict[str, bool] = {}
+APP_VERSION = "1.0"
 
 # No Android, usar o diretório de dados do app
 try:
@@ -91,6 +99,15 @@ except ImportError:
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 DEVICES_CACHE_PATH = os.path.join(BASE_DIR, "devices_cache.json")
 PENDING_HEARTBEAT_LOGS_PATH = os.path.join(BASE_DIR, "pending_heartbeat_logs.json")
+REMOTE_COMMAND_TABLE = "remote_commands"
+REMOTE_COMMAND_TOPIC = "realtime:remote_commands"
+REMOTE_COMMAND_HEARTBEAT_SECONDS = 20
+REMOTE_COMMAND_RECONNECT_SECONDS = 10
+REMOTE_COMMAND_LISTENER_STARTED = False
+REMOTE_COMMAND_LISTENER_LOCK = threading.Lock()
+REMOTE_COMMAND_WS_LOCK = threading.Lock()
+REMOTE_COMMAND_WS_APP = None
+REMOTE_COMMAND_REF_COUNTER = 0
 
 def load_config_from_env() -> Dict[str, Any]:
     """Carrega configurações de variáveis de ambiente."""
@@ -501,6 +518,7 @@ def update_device_by_id_in_db(
             update_data["lan_ip"] = lan_ip
         if protocol_version is not None:
             update_data["protocol_version"] = protocol_version
+        update_data["versao"] = APP_VERSION
         
         if not update_data:
             log(f"[DB] Nenhum dado para atualizar por id={device_row_id}")
@@ -665,13 +683,35 @@ def create_device_in_db(
         return False
     
     try:
+        # Regra de negócio: site_id não deve gerar duplicidade.
+        # Se já existir uma linha para o mesmo site_id, substituímos/atualizamos
+        # a linha atual em vez de criar um novo registro.
+        existing_by_site = get_device_by_site_id_from_db(site_id)
+        if existing_by_site:
+            row_id = existing_by_site.get("id")
+            old_tuya_id = existing_by_site.get("tuya_device_id")
+            log(
+                f"[DB] site_id={site_id} já existe (tuya antigo={old_tuya_id}); "
+                f"atualizando linha existente em vez de criar nova"
+            )
+            return update_device_by_id_in_db(
+                device_row_id=str(row_id),
+                tuya_device_id=tuya_device_id,
+                site_id=site_id,
+                name=name,
+                local_key=local_key,
+                lan_ip=lan_ip,
+                protocol_version=protocol_version
+            )
+
         base_url = get_supabase_url()
         headers = get_supabase_headers()
         
         # Construir dict com dados do novo device
         device_data = {
             'tuya_device_id': tuya_device_id,
-            'site_id': site_id
+            'site_id': site_id,
+            'versao': APP_VERSION
         }
         
         if name is not None:
@@ -909,6 +949,7 @@ def update_device_heartbeat(
         url = f"{base_url}/tuya_devices?tuya_device_id=eq.{tuya_device_id}"
         
         update_data: Dict[str, Any] = {}
+        update_data["versao"] = APP_VERSION
         
         # Atualizar servidor_online apenas se considerarmos o device online
         if (not lan_ip or not local_key) or device_online:
@@ -1071,6 +1112,7 @@ def update_device_in_db(
         
         if protocol_version is not None:
             update_data['protocol_version'] = protocol_version
+        update_data['versao'] = APP_VERSION
         
         # updated_at será atualizado automaticamente pelo banco (default now())
         
@@ -1860,178 +1902,641 @@ def normalize_version(version: Any) -> Optional[float]:
     except (ValueError, TypeError):
         return None
 
+def current_timestamp_iso() -> str:
+    """Retorna timestamp UTC no formato ISO com milissegundos."""
+    now_utc = datetime.now(timezone.utc)
+    return now_utc.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "+00:00"
+
+def execute_tuya_command_request(data: Dict[str, Any], command_received_iso: Optional[str] = None) -> Dict[str, Any]:
+    """Executa a mesma lógica de /tuya/command para uso via HTTP e comandos remotos."""
+    if command_received_iso is None:
+        command_received_iso = current_timestamp_iso()
+
+    action = data.get("action")
+    tuya_device_id = data.get("tuya_device_id")
+    local_key = data.get("local_key")
+    lan_ip = data.get("lan_ip")  # pode vir None, vazio ou "auto"
+    version = data.get("version")  # pode vir None, vazio ou um número
+
+    if action not in ("on", "off"):
+        raise ValueError("action deve ser 'on' ou 'off'")
+
+    if not tuya_device_id:
+        last_active = get_last_active_device()
+        if last_active:
+            tuya_device_id = last_active
+            log(f"[COMMAND] Usando último dispositivo ativo: {tuya_device_id}")
+        else:
+            cache = load_devices_cache()
+            device_ids = [k for k in cache.keys() if not k.startswith("_")]
+            if len(device_ids) == 1:
+                tuya_device_id = device_ids[0]
+                log(f"[COMMAND] Usando único dispositivo no cache: {tuya_device_id}")
+            else:
+                raise ValueError("tuya_device_id é obrigatório quando há múltiplos dispositivos no cache")
+
+    if not tuya_device_id:
+        raise ValueError("tuya_device_id é obrigatório")
+
+    version = normalize_version(version)
+    if version is not None and version <= 0:
+        raise ValueError("version deve ser um número positivo")
+
+    device_name = data.get("device_name")
+    used_fallback = False
+    fallback_source = None
+
+    if not local_key or not lan_ip or lan_ip == "auto" or version is None:
+        log("[COMMAND] Dados incompletos no JSON - buscando do cache persistente/banco")
+        log(f"[COMMAND] local_key presente: {bool(local_key)}, lan_ip: {lan_ip}, version: {version}")
+
+        cached_device = get_device_from_cache(tuya_device_id)
+        if cached_device:
+            log("[COMMAND] Device encontrado no cache persistente")
+            used_fallback = True
+            fallback_source = "cache_local"
+
+            if not local_key:
+                local_key = cached_device.get('local_key')
+                if local_key:
+                    log(f"[COMMAND] local_key obtida do cache local: {mask_local_key(local_key)}")
+
+            if not lan_ip or lan_ip == "auto":
+                lan_ip = cached_device.get('lan_ip')
+                if lan_ip:
+                    log(f"[COMMAND] lan_ip obtido do cache local: {lan_ip}")
+
+            if version is None:
+                cached_version = cached_device.get('version')
+                if cached_version:
+                    version = normalize_version(cached_version)
+                    if version:
+                        log(f"[COMMAND] version obtida do cache local: {version}")
+
+        if not local_key or not lan_ip or lan_ip == "auto" or version is None:
+            db_devices = get_devices_from_db([tuya_device_id])
+            if tuya_device_id in db_devices:
+                db_device = db_devices[tuya_device_id]
+                log("[COMMAND] Device encontrado no banco, usando dados do banco")
+                used_fallback = True
+                fallback_source = "banco"
+
+                if not local_key:
+                    local_key = db_device.get('local_key')
+                    if local_key:
+                        log(f"[COMMAND] local_key obtida do banco: {mask_local_key(local_key)}")
+
+                if not lan_ip or lan_ip == "auto":
+                    lan_ip = db_device.get('lan_ip')
+                    if lan_ip:
+                        log(f"[COMMAND] lan_ip obtido do banco: {lan_ip}")
+
+                if version is None:
+                    protocol_version = db_device.get('protocol_version')
+                    if protocol_version:
+                        version = normalize_version(protocol_version)
+                        if version:
+                            log(f"[COMMAND] version obtida do banco: {version}")
+            else:
+                log(f"[COMMAND] Device {tuya_device_id} não encontrado no banco")
+
+    if not local_key:
+        raise ValueError("local_key é obrigatório e não foi encontrado no cache ou banco")
+
+    version_float = float(version) if version is not None else None
+
+    send_tuya_command(
+        action=action,
+        tuya_device_id=tuya_device_id,
+        local_key=local_key,
+        lan_ip=lan_ip,
+        version=version_float
+    )
+
+    site_id = get_device_site_id_from_db(tuya_device_id) or SITE_NAME
+    insert_heartbeat_ok_log(
+        site_id=site_id,
+        status="ok",
+        tuya_device_id=tuya_device_id,
+        event_time_iso=command_received_iso
+    )
+
+    if local_key and lan_ip and version_float:
+        save_device_to_cache(
+            tuya_device_id=tuya_device_id,
+            local_key=local_key,
+            lan_ip=lan_ip,
+            version=version_float,
+            device_name=device_name
+        )
+        set_last_active_device(tuya_device_id)
+        log("[COMMAND] Dados salvos no cache persistente para próximas chamadas")
+
+    response_data = {
+        "ok": True,
+        "device": {
+            "id": tuya_device_id,
+            "ip": str(lan_ip) if lan_ip else "",
+            "version": str(version_float) if version_float else ""
+        }
+    }
+
+    if used_fallback:
+        log(f"[COMMAND] Retornando dados do dispositivo (usado fallback: {fallback_source})")
+    else:
+        log("[COMMAND] Retornando dados do dispositivo (dados do JSON)")
+
+    return response_data
+
+def resolve_device_context_for_test(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Resolve dados do device para um teste remoto sem alterar o estado da placa."""
+    requested_device_id = record.get("tuya_device_id")
+    resolved_device_id = requested_device_id
+    resolution_source = "request"
+
+    if not resolved_device_id:
+        last_active = get_last_active_device()
+        if last_active:
+            resolved_device_id = last_active
+            resolution_source = "last_active"
+        else:
+            cache = load_devices_cache()
+            device_ids = [k for k in cache.keys() if not k.startswith("_")]
+            if len(device_ids) == 1:
+                resolved_device_id = device_ids[0]
+                resolution_source = "cache_single"
+
+    if not resolved_device_id:
+        raise ValueError("tuya_device_id é obrigatório para teste quando não há dispositivo único/ativo")
+
+    cache_device = get_device_from_cache(resolved_device_id) or {}
+    db_device = get_devices_from_db([resolved_device_id]).get(resolved_device_id, {})
+
+    local_key = (
+        record.get("local_key")
+        or cache_device.get("local_key")
+        or db_device.get("local_key")
+    )
+    lan_ip = (
+        record.get("lan_ip")
+        or cache_device.get("lan_ip")
+        or db_device.get("lan_ip")
+    )
+    version = normalize_version(
+        record.get("version")
+        or cache_device.get("version")
+        or db_device.get("protocol_version")
+    )
+
+    return {
+        "tuya_device_id": resolved_device_id,
+        "resolution_source": resolution_source,
+        "local_key": local_key,
+        "lan_ip": lan_ip,
+        "version": version,
+        "cache_device": cache_device,
+        "db_device": db_device,
+    }
+
+def run_remote_system_test(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Executa um teste remoto de saúde do gateway e da placa, sem alterar estado."""
+    context = resolve_device_context_for_test(record)
+    tuya_device_id = context["tuya_device_id"]
+    lan_ip = context["lan_ip"]
+    local_key = context["local_key"]
+    version = context["version"] or 3.3
+    cache_device = context["cache_device"]
+    db_device = context["db_device"]
+
+    device_ping_ok = False
+    device_status_payload = None
+    ping_error = None
+
+    if lan_ip and local_key:
+        try:
+            device = tinytuya.OutletDevice(tuya_device_id, lan_ip, local_key)
+            device.set_version(version)
+            status = tuya_status_with_timeout(device, timeout_seconds=COMMAND_PREFLIGHT_TIMEOUT_SECONDS)
+            if status:
+                device_ping_ok = True
+                device_status_payload = status
+            else:
+                ping_error = "Placa não respondeu ao status()"
+        except Exception as e:
+            ping_error = str(e)
+    else:
+        ping_error = "Dados insuficientes para ping (lan_ip/local_key ausentes)"
+
+    checks = {
+        "server_running": True,
+        "supabase_configured": bool(SUPABASE_CONFIG.get("url") and SUPABASE_CONFIG.get("anon_key")),
+        "device_found_in_db": bool(db_device),
+        "device_found_in_cache": bool(cache_device),
+        "device_has_lan_ip": bool(lan_ip),
+        "device_has_local_key": bool(local_key),
+        "device_ping_ok": device_ping_ok,
+    }
+
+    all_ok = all([
+        checks["server_running"],
+        checks["supabase_configured"],
+        checks["device_found_in_db"] or checks["device_found_in_cache"],
+        checks["device_has_lan_ip"],
+        checks["device_has_local_key"],
+        checks["device_ping_ok"],
+    ])
+
+    result = {
+        "ok": all_ok,
+        "action": "test",
+        "site": SITE_NAME,
+        "app_version": APP_VERSION,
+        "device": {
+            "id": tuya_device_id,
+            "lan_ip": lan_ip or "",
+            "version": str(version) if version else "",
+            "resolution_source": context["resolution_source"],
+        },
+        "checks": checks,
+    }
+
+    if device_status_payload is not None:
+        result["device_status"] = device_status_payload
+
+    if ping_error:
+        result["ping_error"] = ping_error
+
+    return result
+
+def execute_remote_command_action(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Executa a ação do comando remoto."""
+    action = record.get("action")
+    if action in ("on", "off"):
+        payload = {
+            "action": action,
+            "tuya_device_id": record.get("tuya_device_id"),
+            "local_key": record.get("local_key"),
+            "lan_ip": record.get("lan_ip"),
+            "version": record.get("version"),
+            "device_name": record.get("device_name"),
+        }
+        return execute_tuya_command_request(payload)
+
+    if action == "test":
+        return run_remote_system_test(record)
+
+    raise ValueError(f"Ação remota inválida: {action}")
+
+def get_supabase_realtime_url() -> str:
+    """Monta a URL do websocket Realtime a partir da URL base do Supabase."""
+    supabase_url = SUPABASE_CONFIG.get("url")
+    anon_key = SUPABASE_CONFIG.get("anon_key")
+    if not supabase_url or not anon_key:
+        raise RuntimeError("Configuração do Supabase não encontrada para Realtime")
+
+    parsed = urlparse(supabase_url)
+    if not parsed.scheme or not parsed.netloc:
+        raise RuntimeError("URL do Supabase inválida para Realtime")
+
+    scheme = "wss" if parsed.scheme == "https" else "ws"
+    return f"{scheme}://{parsed.netloc}/realtime/v1/websocket?apikey={anon_key}&vsn=1.0.0"
+
+def next_remote_command_ref() -> str:
+    """Gera refs sequenciais para mensagens do protocolo Phoenix."""
+    global REMOTE_COMMAND_REF_COUNTER
+    with REMOTE_COMMAND_WS_LOCK:
+        REMOTE_COMMAND_REF_COUNTER += 1
+        return str(REMOTE_COMMAND_REF_COUNTER)
+
+def claim_remote_command(command_id: Any) -> bool:
+    """Marca um comando pendente como processing para evitar execução duplicada."""
+    if not REQUESTS_AVAILABLE:
+        return False
+
+    try:
+        base_url = get_supabase_url()
+        headers = get_supabase_headers()
+        claim_url = f"{base_url}/{REMOTE_COMMAND_TABLE}?id=eq.{command_id}&status=eq.pending"
+        payload = {
+            "status": "processing",
+            "claimed_at": current_timestamp_iso(),
+            "processor_site_id": SITE_NAME,
+        }
+        response = requests.patch(
+            claim_url,
+            json=payload,
+            headers=headers,
+            timeout=15
+        )
+        response.raise_for_status()
+        data = response.json()
+        claimed = bool(data)
+        if claimed:
+            log(f"[REMOTE] Comando {command_id} reivindicado para processamento")
+        else:
+            log(f"[REMOTE] Comando {command_id} já não estava pendente")
+        return claimed
+    except Exception as e:
+        log(f"[REMOTE] Erro ao reivindicar comando {command_id}: {e}")
+        traceback.print_exc()
+        return False
+
+def update_remote_command_status(
+    command_id: Any,
+    status: str,
+    result: Optional[Dict[str, Any]] = None,
+    error_message: Optional[str] = None
+) -> bool:
+    """Atualiza o status final do comando remoto no banco."""
+    if not REQUESTS_AVAILABLE:
+        return False
+
+    try:
+        base_url = get_supabase_url()
+        headers = get_supabase_headers()
+        update_url = f"{base_url}/{REMOTE_COMMAND_TABLE}?id=eq.{command_id}"
+        payload: Dict[str, Any] = {
+            "status": status,
+            "updated_at": current_timestamp_iso(),
+        }
+
+        if status in ("done", "error"):
+            payload["executed_at"] = current_timestamp_iso()
+
+        if result is not None:
+            payload["result"] = result
+
+        if error_message is not None:
+            payload["error_message"] = error_message[:500]
+
+        response = requests.patch(update_url, json=payload, headers=headers, timeout=15)
+        response.raise_for_status()
+        log(f"[REMOTE] Comando {command_id} marcado como {status}")
+        return True
+    except Exception as e:
+        log(f"[REMOTE] Erro ao atualizar status do comando {command_id}: {e}")
+        traceback.print_exc()
+        return False
+
+def delete_remote_command(command_id: Any) -> bool:
+    """Remove um comando remoto do banco."""
+    if not REQUESTS_AVAILABLE:
+        return False
+
+    try:
+        base_url = get_supabase_url()
+        headers = get_supabase_headers()
+        delete_url = f"{base_url}/{REMOTE_COMMAND_TABLE}?id=eq.{command_id}"
+        response = requests.delete(delete_url, headers=headers, timeout=15)
+        response.raise_for_status()
+        log(f"[REMOTE] Comando {command_id} removido da fila")
+        return True
+    except Exception as e:
+        log(f"[REMOTE] Erro ao remover comando {command_id}: {e}")
+        traceback.print_exc()
+        return False
+
+def find_existing_saved_test_command(site_id: str, exclude_command_id: Any) -> Optional[Dict[str, Any]]:
+    """Busca um comando de teste já salvo para o mesmo site, excluindo o atual."""
+    if not REQUESTS_AVAILABLE:
+        return None
+
+    try:
+        base_url = get_supabase_url()
+        headers = get_supabase_headers()
+        find_url = (
+            f"{base_url}/{REMOTE_COMMAND_TABLE}"
+            f"?site_id=eq.{site_id}"
+            f"&action=eq.test"
+            f"&id=neq.{exclude_command_id}"
+            f"&select=id"
+            f"&order=updated_at.desc.nullslast,created_at.desc"
+            f"&limit=1"
+        )
+        response = requests.get(find_url, headers=headers, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+        if data:
+            return data[0]
+        return None
+    except Exception as e:
+        log(f"[REMOTE] Erro ao buscar teste salvo para site_id={site_id}: {e}")
+        traceback.print_exc()
+        return None
+
+def save_single_test_command_result(
+    command_id: Any,
+    site_id: str,
+    result: Optional[Dict[str, Any]] = None,
+    error_message: Optional[str] = None
+) -> bool:
+    """
+    Mantém apenas um registro de teste por site.
+    Se já existir um teste anterior para o site, sobrescreve o antigo e remove o novo.
+    """
+    target_command_id = command_id
+    existing_saved = find_existing_saved_test_command(site_id, command_id)
+    if existing_saved and existing_saved.get("id") is not None:
+        target_command_id = existing_saved["id"]
+
+    status = "done" if error_message is None else "error"
+    ok = update_remote_command_status(
+        target_command_id,
+        status=status,
+        result=result,
+        error_message=error_message
+    )
+    if not ok:
+        return False
+
+    if target_command_id != command_id:
+        delete_remote_command(command_id)
+
+    return True
+
+def process_remote_command_record(record: Dict[str, Any]) -> None:
+    """Processa um comando remoto recebido via Realtime."""
+    command_id = record.get("id")
+    action = record.get("action")
+    status = record.get("status")
+    command_site_id = record.get("site_id")
+
+    if command_site_id and command_site_id != SITE_NAME:
+        log(f"[REMOTE] Ignorando comando {command_id}: site_id diferente ({command_site_id})")
+        return
+
+    if status not in (None, "pending"):
+        log(f"[REMOTE] Ignorando comando {command_id}: status atual = {status}")
+        return
+
+    if not command_id:
+        log("[REMOTE] Ignorando comando sem id")
+        return
+
+    if not claim_remote_command(command_id):
+        return
+
+    try:
+        response_data = execute_remote_command_action(record)
+        if action in ("on", "off"):
+            update_remote_command_status(command_id, "done", result=response_data)
+            delete_remote_command(command_id)
+        elif action == "test":
+            save_single_test_command_result(
+                command_id=command_id,
+                site_id=command_site_id or SITE_NAME,
+                result=response_data
+            )
+        else:
+            update_remote_command_status(command_id, "done", result=response_data)
+    except Exception as e:
+        err = str(e)
+        log(f"[REMOTE] Falha ao executar comando remoto {command_id}: {err}")
+        if action == "test":
+            save_single_test_command_result(
+                command_id=command_id,
+                site_id=command_site_id or SITE_NAME,
+                error_message=err
+            )
+        else:
+            update_remote_command_status(command_id, "error", error_message=err)
+
+def handle_remote_realtime_message(message: str) -> None:
+    """Processa mensagens recebidas do websocket Realtime do Supabase."""
+    try:
+        payload = json.loads(message)
+    except json.JSONDecodeError:
+        log(f"[REMOTE] Mensagem inválida recebida do Realtime: {message[:200]}")
+        return
+
+    event = payload.get("event")
+    topic = payload.get("topic")
+
+    if event in ("phx_reply", "system", "heartbeat"):
+        return
+
+    if topic != REMOTE_COMMAND_TOPIC or event != "postgres_changes":
+        return
+
+    data = payload.get("payload", {}).get("data", {})
+    record = data.get("record") or {}
+    if not isinstance(record, dict):
+        return
+
+    threading.Thread(
+        target=process_remote_command_record,
+        args=(record,),
+        daemon=True
+    ).start()
+
+def send_remote_realtime_heartbeat(ws_app: Any) -> None:
+    """Envia heartbeats do protocolo Phoenix enquanto o websocket estiver aberto."""
+    while True:
+        time.sleep(REMOTE_COMMAND_HEARTBEAT_SECONDS)
+        with REMOTE_COMMAND_WS_LOCK:
+            active_ws = REMOTE_COMMAND_WS_APP
+        if active_ws is not ws_app:
+            return
+        try:
+            ws_app.send(json.dumps({
+                "topic": "phoenix",
+                "event": "heartbeat",
+                "payload": {},
+                "ref": next_remote_command_ref()
+            }))
+        except Exception as e:
+            log(f"[REMOTE] Erro ao enviar heartbeat Realtime: {e}")
+            return
+
+def remote_command_listener_loop() -> None:
+    """Mantém uma conexão Realtime com o Supabase para ouvir comandos remotos."""
+    if not WEBSOCKET_CLIENT_AVAILABLE:
+        log("[REMOTE] Listener em tempo real não iniciado: websocket-client indisponível")
+        return
+
+    while True:
+        try:
+            ws_url = get_supabase_realtime_url()
+            join_payload = {
+                "config": {
+                    "broadcast": {"self": False},
+                    "presence": {"key": SITE_NAME},
+                    "postgres_changes": [{
+                        "event": "INSERT",
+                        "schema": "public",
+                        "table": REMOTE_COMMAND_TABLE,
+                        "filter": f"site_id=eq.{SITE_NAME}"
+                    }]
+                }
+            }
+
+            def on_open(ws_app: Any) -> None:
+                with REMOTE_COMMAND_WS_LOCK:
+                    global REMOTE_COMMAND_WS_APP
+                    REMOTE_COMMAND_WS_APP = ws_app
+                log(f"[REMOTE] Conectado ao Realtime do Supabase para site_id={SITE_NAME}")
+                ws_app.send(json.dumps({
+                    "topic": REMOTE_COMMAND_TOPIC,
+                    "event": "phx_join",
+                    "payload": join_payload,
+                    "ref": next_remote_command_ref()
+                }))
+                threading.Thread(
+                    target=send_remote_realtime_heartbeat,
+                    args=(ws_app,),
+                    daemon=True
+                ).start()
+
+            def on_message(_: Any, message: str) -> None:
+                handle_remote_realtime_message(message)
+
+            def on_error(_: Any, error: Any) -> None:
+                log(f"[REMOTE] Erro no websocket Realtime: {error}")
+
+            def on_close(_: Any, status_code: Any, close_msg: Any) -> None:
+                with REMOTE_COMMAND_WS_LOCK:
+                    global REMOTE_COMMAND_WS_APP
+                    REMOTE_COMMAND_WS_APP = None
+                log(f"[REMOTE] Websocket Realtime encerrado (code={status_code}, msg={close_msg})")
+
+            ws_app = websocket.WebSocketApp(
+                ws_url,
+                on_open=on_open,
+                on_message=on_message,
+                on_error=on_error,
+                on_close=on_close
+            )
+            ws_app.run_forever(ping_interval=0)
+        except Exception as e:
+            log(f"[REMOTE] Listener Realtime caiu: {e}")
+            traceback.print_exc()
+
+        time.sleep(REMOTE_COMMAND_RECONNECT_SECONDS)
+
+def start_remote_command_listener() -> None:
+    """Inicia o listener Realtime uma única vez."""
+    global REMOTE_COMMAND_LISTENER_STARTED
+    with REMOTE_COMMAND_LISTENER_LOCK:
+        if REMOTE_COMMAND_LISTENER_STARTED:
+            return
+
+        threading.Thread(
+            target=remote_command_listener_loop,
+            daemon=True
+        ).start()
+        REMOTE_COMMAND_LISTENER_STARTED = True
+        log("[REMOTE] Listener de comandos remotos iniciado")
+
 @app.route("/tuya/command", methods=["POST"])
 def api_tuya_command():
     try:
         data: Dict[str, Any] = request.get_json(silent=True)
         if data is None:
             return jsonify({"ok": False, "error": "JSON inválido"}), 400
-        
-        # Preservar exatamente o horário de recebimento do comando.
-        command_received_utc = datetime.now(timezone.utc)
-        command_received_iso = command_received_utc.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "+00:00"
-        
-        action = data.get("action")
-        tuya_device_id = data.get("tuya_device_id")
-        local_key = data.get("local_key")
-        lan_ip = data.get("lan_ip")  # pode vir None, vazio ou "auto"
-        version = data.get("version")  # pode vir None, vazio ou um número (ex: 3.3, 3.4)
-        
-        if action not in ("on", "off"):
-            return jsonify({"ok": False, "error": "action deve ser 'on' ou 'off'"}), 400
-        
-        # Se não enviou device_id, usar o último dispositivo ativo ou único no cache
-        if not tuya_device_id:
-            last_active = get_last_active_device()
-            if last_active:
-                tuya_device_id = last_active
-                log(f"[COMMAND] Usando último dispositivo ativo: {tuya_device_id}")
-            else:
-                # Tentar pegar o único dispositivo no cache
-                cache = load_devices_cache()
-                device_ids = [k for k in cache.keys() if not k.startswith("_")]
-                if len(device_ids) == 1:
-                    tuya_device_id = device_ids[0]
-                    log(f"[COMMAND] Usando único dispositivo no cache: {tuya_device_id}")
-                else:
-                    return jsonify({
-                        "ok": False,
-                        "error": "tuya_device_id é obrigatório quando há múltiplos dispositivos no cache"
-                    }), 400
-        
-        # Garantir que temos um device_id válido
-        if not tuya_device_id:
-            return jsonify({"ok": False, "error": "tuya_device_id é obrigatório"}), 400
-        
-        # Normalizar version
-        version = normalize_version(version)
-        if version is not None and version <= 0:
-            return jsonify({"ok": False, "error": "version deve ser um número positivo"}), 400
-        
-        # Extrair device_name se fornecido
-        device_name = data.get("device_name")
-        
-        # FALLBACK: Se local_key, lan_ip ou version não vierem no JSON, buscar do cache persistente ou banco
-        used_fallback = False
-        fallback_source = None
-        
-        if not local_key or not lan_ip or lan_ip == "auto" or version is None:
-            log(f"[COMMAND] Dados incompletos no JSON - buscando do cache persistente/banco")
-            log(f"[COMMAND] local_key presente: {bool(local_key)}, lan_ip: {lan_ip}, version: {version}")
-            
-            # PRIORIDADE 1: Cache persistente local
-            cached_device = get_device_from_cache(tuya_device_id)
-            if cached_device:
-                log(f"[COMMAND] Device encontrado no cache persistente")
-                used_fallback = True
-                fallback_source = "cache_local"
-                
-                # Usar dados do cache apenas se não vieram no JSON
-                if not local_key:
-                    local_key = cached_device.get('local_key')
-                    if local_key:
-                        log(f"[COMMAND] local_key obtida do cache local: {mask_local_key(local_key)}")
-                
-                if not lan_ip or lan_ip == "auto":
-                    lan_ip = cached_device.get('lan_ip')
-                    if lan_ip:
-                        log(f"[COMMAND] lan_ip obtido do cache local: {lan_ip}")
-                
-                if version is None:
-                    cached_version = cached_device.get('version')
-                    if cached_version:
-                        version = normalize_version(cached_version)
-                        if version:
-                            log(f"[COMMAND] version obtida do cache local: {version}")
-            
-            # PRIORIDADE 2: Banco de dados (se cache local não tiver todos os dados)
-            if (not local_key or not lan_ip or lan_ip == "auto" or version is None):
-                db_devices = get_devices_from_db([tuya_device_id])
-                if tuya_device_id in db_devices:
-                    db_device = db_devices[tuya_device_id]
-                    log(f"[COMMAND] Device encontrado no banco, usando dados do banco")
-                    used_fallback = True
-                    fallback_source = "banco"
-                    
-                    # Usar dados do banco apenas se não vieram no JSON e não estão no cache
-                    if not local_key:
-                        local_key = db_device.get('local_key')
-                        if local_key:
-                            log(f"[COMMAND] local_key obtida do banco: {mask_local_key(local_key)}")
-                    
-                    if not lan_ip or lan_ip == "auto":
-                        lan_ip = db_device.get('lan_ip')
-                        if lan_ip:
-                            log(f"[COMMAND] lan_ip obtido do banco: {lan_ip}")
-                    
-                    if version is None:
-                        protocol_version = db_device.get('protocol_version')
-                        if protocol_version:
-                            version = normalize_version(protocol_version)
-                            if version:
-                                log(f"[COMMAND] version obtida do banco: {version}")
-                else:
-                    log(f"[COMMAND] Device {tuya_device_id} não encontrado no banco")
-        
-        # Validar se temos os dados mínimos necessários
-        if not local_key:
-            return jsonify({"ok": False, "error": "local_key é obrigatório e não foi encontrado no cache ou banco"}), 400
-        
-        # Converter version para float (já normalizado, mas garantir)
-        version_float = None
-        if version is not None:
-            version_float = float(version)
-        
-        send_tuya_command(
-            action=action,
-            tuya_device_id=tuya_device_id,
-            local_key=local_key,
-            lan_ip=lan_ip,
-            version=version_float
-        )
-
-        # Registrar no banco apenas quando um comando manual retornar sucesso.
-        site_id = get_device_site_id_from_db(tuya_device_id) or SITE_NAME
-        insert_heartbeat_ok_log(
-            site_id=site_id,
-            status="ok",
-            tuya_device_id=tuya_device_id,
-            event_time_iso=command_received_iso
-        )
-        
-        # SALVAR NO CACHE PERSISTENTE sempre que tivermos dados completos
-        # Isso garante que nas próximas chamadas não precisaremos enviar tudo novamente
-        # Salvar mesmo se veio do banco, para acelerar próximas chamadas
-        if local_key and lan_ip and version_float:
-            save_device_to_cache(
-                tuya_device_id=tuya_device_id,
-                local_key=local_key,
-                lan_ip=lan_ip,
-                version=version_float,
-                device_name=device_name
-            )
-            # Salvar como último dispositivo ativo
-            set_last_active_device(tuya_device_id)
-            log(f"[COMMAND] Dados salvos no cache persistente para próximas chamadas")
-        
-        # Sempre retornar dados do dispositivo para atualizar cache no cliente
-        # Isso garante que o cache seja atualizado mesmo quando não usa fallback
-        # NÃO incluir local_key no response por segurança
-        response_data = {
-            "ok": True,
-            "device": {
-                "id": tuya_device_id,
-                "ip": str(lan_ip) if lan_ip else "",
-                "version": str(version_float) if version_float else ""
-            }
-        }
-        
-        if used_fallback:
-            log(f"[COMMAND] Retornando dados do dispositivo (usado fallback: {fallback_source})")
-        else:
-            log(f"[COMMAND] Retornando dados do dispositivo (dados do JSON)")
-        
+        response_data = execute_tuya_command_request(data)
         return jsonify(response_data), 200
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
     
     except RuntimeError as e:
         err = str(e)
@@ -2387,4 +2892,6 @@ def start_server(host="0.0.0.0", port=8000):
     scan_and_print_devices()
     # Iniciar refresh periódico
     start_device_refresh_loop()
+    # Escutar comandos remotos em tempo real sem polling REST contínuo
+    start_remote_command_listener()
     app.run(host=host, port=port, debug=False, use_reloader=False)
