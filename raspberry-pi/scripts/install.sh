@@ -2,7 +2,6 @@
 set -e
 
 INSTALL_DIR="/home/mrit/mrit-server"
-SERVICE_NAME="mrit-server"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 
@@ -16,22 +15,26 @@ if [ "$EUID" -eq 0 ]; then
     exit 1
 fi
 
-echo "[1/6] Criando diretorio de instalacao..."
-mkdir -p "$INSTALL_DIR"
+echo "[1/8] Criando diretorio de instalacao..."
+mkdir -p "$INSTALL_DIR/scripts"
 
-echo "[2/6] Copiando servidor..."
+echo "[2/8] Copiando arquivos do servidor..."
 cp "$ROOT_DIR/server/tuya_server.py" "$INSTALL_DIR/"
+cp "$ROOT_DIR/server/web_ui.py" "$INSTALL_DIR/"
+cp -r "$ROOT_DIR/server/templates" "$INSTALL_DIR/"
+cp "$ROOT_DIR/scripts/wifi_check.sh" "$INSTALL_DIR/scripts/"
+chmod +x "$INSTALL_DIR/scripts/wifi_check.sh"
 
-echo "[3/6] Criando ambiente virtual Python..."
+echo "[3/8] Criando ambiente virtual Python..."
 python3 -m venv "$INSTALL_DIR/venv"
 source "$INSTALL_DIR/venv/bin/activate"
 
-echo "[4/6] Instalando dependencias Python..."
+echo "[4/8] Instalando dependencias Python..."
 pip install --upgrade pip --quiet
 pip install -r "$ROOT_DIR/requirements.txt" --quiet
 echo "      Dependencias instaladas."
 
-echo "[5/6] Configurando config.json..."
+echo "[5/8] Configurando config.json..."
 if [ ! -f "$INSTALL_DIR/config.json" ]; then
     echo ""
     echo "  Digite o e-mail da unidade (sera usado como site_id):"
@@ -42,7 +45,6 @@ if [ ! -f "$INSTALL_DIR/config.json" ]; then
         read -p "  > " SITE_ID
     done
 
-    # Gerar config.json com site_id informado e credenciais pre-configuradas
     python3 -c "
 import json, sys
 template = json.load(open('$ROOT_DIR/config.example.json'))
@@ -59,15 +61,31 @@ else
     echo "      site_id atual: $SITE_ID"
 fi
 
-echo "[6/6] Instalando servico systemd..."
-sudo cp "$ROOT_DIR/systemd/$SERVICE_NAME.service" /etc/systemd/system/
+echo "[6/8] Configurando permissoes sudo..."
+echo "mrit ALL=(ALL) NOPASSWD: /usr/bin/nmcli" | sudo tee /etc/sudoers.d/mrit > /dev/null
+echo "mrit ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart mrit-server" | sudo tee -a /etc/sudoers.d/mrit > /dev/null
+sudo chmod 440 /etc/sudoers.d/mrit
+echo "      Permissoes configuradas."
+
+echo "[7/8] Instalando servicos systemd..."
+sudo cp "$ROOT_DIR/systemd/mrit-server.service" /etc/systemd/system/
+sudo cp "$ROOT_DIR/systemd/mrit-webui.service" /etc/systemd/system/
+sudo cp "$ROOT_DIR/systemd/mrit-wifi-check.service" /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable "$SERVICE_NAME"
+sudo systemctl enable mrit-server mrit-webui mrit-wifi-check
+echo "      Servicos habilitados."
+
+echo "[8/8] Iniciando servicos..."
+sudo systemctl start mrit-webui
+sudo systemctl start mrit-wifi-check
+sudo systemctl start mrit-server
 
 echo ""
 echo "=== Instalacao concluida! ==="
 echo ""
-echo "  Inicie o servidor:  sudo systemctl start $SERVICE_NAME"
-echo "  Veja os logs:       journalctl -u $SERVICE_NAME -f"
-echo "  Status do servico:  sudo systemctl status $SERVICE_NAME"
+echo "  Interface web:  http://mrit-pi.local"
+echo "  Senha:          MRITSERVER#REDEGELAFIT"
+echo ""
+echo "  Logs servidor:  journalctl -u mrit-server -f"
+echo "  Logs webui:     journalctl -u mrit-webui -f"
 echo ""

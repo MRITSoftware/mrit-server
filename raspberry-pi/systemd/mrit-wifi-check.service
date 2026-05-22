@@ -1,0 +1,15 @@
+[Unit]
+Description=MRIT WiFi Auto Hotspot
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/mrit/mrit-server/scripts/wifi_check.sh
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mrit-wifi-check
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MRIT – {{ cfg.get('site_name','') }}</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+     background:#0f172a;color:#f1f5f9;min-height:100vh}
+
+.hdr{background:#1e293b;padding:14px 20px;display:flex;align-items:center;
+     justify-content:space-between;border-bottom:1px solid #334155;
+     position:sticky;top:0;z-index:10}
+.hdr h1{color:#38bdf8;font-size:17px;font-weight:700;letter-spacing:2px}
+.hdr p{color:#64748b;font-size:11px;margin-top:2px}
+.hdr a{color:#64748b;font-size:12px;text-decoration:none;padding:6px 12px;
+       border:1px solid #334155;border-radius:6px}
+.hdr a:hover{color:#f1f5f9;border-color:#64748b}
+
+.status-bar{background:#0f172a;padding:10px 20px;display:flex;gap:10px;
+            border-bottom:1px solid #1e293b;flex-wrap:wrap}
+.pill{display:flex;align-items:center;gap:6px;font-size:12px;
+      padding:4px 10px;border-radius:20px;background:#1e293b;white-space:nowrap}
+.dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+.dot.green{background:#22c55e}.dot.red{background:#ef4444}
+
+.tabs{display:flex;background:#1e293b;border-bottom:2px solid #334155}
+.tab-btn{flex:1;padding:13px 6px;background:none;border:none;border-bottom:2px solid transparent;
+         color:#64748b;font-size:13px;font-weight:600;cursor:pointer;
+         transition:.15s;margin-bottom:-2px}
+.tab-btn.active{color:#38bdf8;border-bottom-color:#38bdf8}
+
+.content{padding:16px;max-width:600px;margin:0 auto}
+.section{display:none}.section.active{display:block}
+
+.card{background:#1e293b;border-radius:14px;padding:18px;margin-bottom:14px;
+      border:1px solid #334155}
+.card h3{font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;
+         letter-spacing:1px;margin-bottom:14px}
+
+label{display:block;font-size:12px;color:#94a3b8;margin-bottom:6px;font-weight:500}
+input[type=text],input[type=password]{
+  width:100%;padding:11px 13px;background:#0f172a;border:1.5px solid #334155;
+  border-radius:8px;color:#f1f5f9;font-size:14px;outline:none;transition:.15s}
+input:focus{border-color:#38bdf8}
+
+.btn{padding:10px 16px;border:none;border-radius:8px;font-size:13px;
+     font-weight:600;cursor:pointer;transition:.15s}
+.btn-primary{background:#0284c7;color:#fff}.btn-primary:hover{background:#0369a1}
+.btn-success{background:#16a34a;color:#fff}.btn-success:hover{background:#15803d}
+.btn-sm{padding:6px 12px;font-size:12px}
+.btn-full{width:100%;display:block;margin-top:4px}
+
+.row{display:flex;gap:8px;align-items:flex-end}
+.row .grow{flex:1}
+
+.hint{font-size:12px;color:#64748b;margin-top:10px;padding:10px 12px;
+      background:#0f172a;border-radius:8px;border:1px solid #1e293b;line-height:1.6}
+
+.net-item{display:flex;align-items:center;justify-content:space-between;
+          padding:11px 0;border-bottom:1px solid #334155}
+.net-item:last-child{border-bottom:none}
+.net-name{font-size:14px;font-weight:500}
+.net-sub{font-size:11px;color:#64748b;margin-top:2px}
+
+.dev-card{background:#0f172a;border:1px solid #1e3a5f;border-radius:10px;
+          padding:14px;margin-bottom:10px}
+.dev-id{font-size:11px;color:#64748b;font-family:monospace;margin-bottom:4px;
+        word-break:break-all}
+.dev-info{font-size:13px;color:#94a3b8;margin-bottom:12px}
+
+.msg{padding:10px 14px;border-radius:8px;font-size:13px;margin-top:10px;line-height:1.4}
+.msg.ok{background:#0a2e1a;color:#4ade80;border:1px solid #14532d}
+.msg.err{background:#1e0a0a;color:#f87171;border:1px solid #7f1d1d}
+
+.loading{text-align:center;padding:20px;color:#64748b;font-size:13px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.sp{width:16px;height:16px;border:2px solid #334155;border-top-color:#38bdf8;
+    border-radius:50%;animation:spin .7s linear infinite;display:inline-block;
+    vertical-align:middle;margin-right:6px}
+</style>
+</head>
+<body>
+
+<div class="hdr">
+  <div>
+    <h1>MRIT SERVER</h1>
+    <p>{{ cfg.get('site_name', '—') }}</p>
+  </div>
+  <a href="/sair">Sair</a>
+</div>
+
+<div class="status-bar">
+  <div class="pill">
+    <div class="dot {{ 'green' if server_ok else 'red' }}"></div>
+    <span>Servidor {{ 'Online' if server_ok else 'Offline' }}</span>
+  </div>
+  <div class="pill">
+    <div class="dot {{ 'green' if wifi.conectado else 'red' }}"></div>
+    <span>{{ wifi.rede if wifi.rede else 'Sem WiFi' }}</span>
+  </div>
+</div>
+
+<div class="tabs">
+  <button class="tab-btn active" onclick="tab('config',this)">Configuracao</button>
+  <button class="tab-btn" onclick="tab('wifi',this)">WiFi</button>
+  <button class="tab-btn" onclick="tab('devices',this)">Dispositivos</button>
+</div>
+
+<div class="content">
+
+  <!-- CONFIG -->
+  <div id="s-config" class="section active">
+    <div class="card">
+      <h3>Site ID</h3>
+      <form action="/config/site" method="post">
+        <label>E-mail da unidade (identificador no banco)</label>
+        <div class="row">
+          <div class="grow">
+            <input type="text" name="site_id"
+                   value="{{ cfg.get('site_name','') }}"
+                   placeholder="unidade@email.com">
+          </div>
+          <button type="submit" class="btn btn-primary">Salvar</button>
+        </div>
+      </form>
+      <div class="hint">Ao salvar, o servidor reinicia automaticamente em ~5 segundos.</div>
+    </div>
+  </div>
+
+  <!-- WIFI -->
+  <div id="s-wifi" class="section">
+    <div class="card">
+      <h3>Rede Atual</h3>
+      <div style="font-size:15px;margin-bottom:14px">
+        {% if wifi.conectado %}
+          <span style="color:#4ade80">● {{ wifi.rede }}</span>
+        {% else %}
+          <span style="color:#f87171">● Desconectado</span>
+        {% endif %}
+      </div>
+      <button class="btn btn-primary btn-full" onclick="buscarRedes()">
+        Buscar Redes WiFi
+      </button>
+      <div class="hint">
+        💡 <strong>Sem WiFi?</strong> Conecte ao hotspot <strong>MRIT-Setup</strong>
+        (senha: <strong>mrit1234</strong>) e acesse <strong>http://mrit-pi.local</strong>
+      </div>
+    </div>
+
+    <div id="card-redes" class="card" style="display:none">
+      <h3>Redes Disponiveis</h3>
+      <div id="lista-redes"></div>
+    </div>
+
+    <div id="card-conectar" class="card" style="display:none">
+      <h3>Conectar</h3>
+      <label>Rede selecionada</label>
+      <input type="text" id="ssid-inp" readonly style="margin-bottom:12px">
+      <label>Senha do WiFi</label>
+      <input type="password" id="senha-inp" placeholder="Senha da rede"
+             style="margin-bottom:14px">
+      <button class="btn btn-success btn-full" onclick="conectar()">Conectar</button>
+      <div id="msg-wifi"></div>
+    </div>
+  </div>
+
+  <!-- DISPOSITIVOS -->
+  <div id="s-devices" class="section">
+    <div class="card">
+      <h3>Descoberta na Rede</h3>
+      <button class="btn btn-primary btn-full" onclick="buscarDisp()">
+        Buscar Dispositivos Tuya
+      </button>
+      <div class="hint">O scan pode levar ate 20 segundos.</div>
+    </div>
+    <div id="lista-disp"></div>
+  </div>
+
+</div>
+
+<script>
+// ── tabs ──────────────────────────────────────────────────────────────────
+function tab(id, btn) {
+  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('s-' + id).classList.add('active');
+  btn.classList.add('active');
+  history.replaceState(null, '', '#' + id);
+}
+(function() {
+  const h = location.hash.replace('#','');
+  const btn = document.querySelector(`.tab-btn[onclick*="'${h}'"]`);
+  if (btn) { btn.click(); }
+})();
+
+// ── wifi ──────────────────────────────────────────────────────────────────
+async function buscarRedes() {
+  const card = document.getElementById('card-redes');
+  const lista = document.getElementById('lista-redes');
+  card.style.display = '';
+  lista.innerHTML = '<div class="loading"><span class="sp"></span>Buscando redes...</div>';
+  try {
+    const r = await fetch('/wifi/redes');
+    const d = await r.json();
+    if (!d.ok || !d.redes.length) {
+      lista.innerHTML = '<div class="msg err">Nenhuma rede encontrada</div>';
+      return;
+    }
+    lista.innerHTML = d.redes.map(n => `
+      <div class="net-item">
+        <div>
+          <div class="net-name">📶 ${esc(n.ssid)}</div>
+          <div class="net-sub">${esc(n.security||'Aberta')} · ${n.signal}%</div>
+        </div>
+        <button class="btn btn-sm btn-primary" onclick="selecionarRede('${esc(n.ssid)}')">
+          Conectar
+        </button>
+      </div>`).join('');
+  } catch(e) {
+    lista.innerHTML = '<div class="msg err">Erro ao buscar redes</div>';
+  }
+}
+
+function selecionarRede(ssid) {
+  document.getElementById('ssid-inp').value = ssid;
+  const card = document.getElementById('card-conectar');
+  card.style.display = '';
+  card.scrollIntoView({behavior:'smooth'});
+}
+
+async function conectar() {
+  const ssid  = document.getElementById('ssid-inp').value;
+  const senha = document.getElementById('senha-inp').value;
+  const msg   = document.getElementById('msg-wifi');
+  msg.innerHTML = '<div class="loading"><span class="sp"></span>Conectando...</div>';
+  try {
+    const r = await fetch('/wifi/conectar', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ssid, senha})
+    });
+    const d = await r.json();
+    msg.innerHTML = d.ok
+      ? `<div class="msg ok">✓ ${esc(d.msg)}<br><small>Recarregando em 5s...</small></div>`
+      : `<div class="msg err">✗ ${esc(d.erro)}</div>`;
+    if (d.ok) setTimeout(() => location.reload(), 5000);
+  } catch(e) {
+    msg.innerHTML = '<div class="msg err">Erro de conexao</div>';
+  }
+}
+
+// ── dispositivos ──────────────────────────────────────────────────────────
+const SITE = {{ cfg.get('site_name','') | tojson }};
+
+async function buscarDisp() {
+  const lista = document.getElementById('lista-disp');
+  lista.innerHTML = '<div class="card loading"><span class="sp"></span>Buscando na rede...</div>';
+  try {
+    const r = await fetch('/dispositivos/buscar');
+    const d = await r.json();
+    if (!d.ok) {
+      lista.innerHTML = `<div class="card msg err">✗ ${esc(d.erro||'Erro')}</div>`;
+      return;
+    }
+    let devs = [];
+    if (Array.isArray(d.devices)) {
+      devs = d.devices;
+    } else if (d.devices && typeof d.devices === 'object') {
+      devs = Object.entries(d.devices).map(([id, info]) => ({
+        gwId: id, ip: info.ip, ver: info.version || info.ver || ''
+      }));
+    }
+    if (!devs.length) {
+      lista.innerHTML = '<div class="card"><p style="color:#64748b;text-align:center;padding:10px">Nenhum dispositivo encontrado</p></div>';
+      return;
+    }
+    lista.innerHTML = devs.map((dev, i) => {
+      const id  = dev.gwId || dev.id || dev.tuya_device_id || '';
+      const ip  = dev.ip   || dev.lan_ip || '';
+      const ver = dev.ver  || dev.version || '';
+      return `
+      <div class="card dev-card">
+        <div class="dev-id">${esc(id)}</div>
+        <div class="dev-info">IP: ${esc(ip)} &nbsp;·&nbsp; Versao: ${esc(ver)}</div>
+        <label>Nome do dispositivo</label>
+        <input type="text" id="nome-${i}" placeholder="Ex: Tomada Principal"
+               style="margin-bottom:12px">
+        <button class="btn btn-success btn-full"
+                onclick="sincronizar(${i},'${esc(id)}','${esc(ip)}','${esc(ver)}')">
+          Sincronizar com Banco
+        </button>
+        <div id="msg-dev-${i}"></div>
+      </div>`;
+    }).join('');
+  } catch(e) {
+    lista.innerHTML = '<div class="card msg err">Erro ao buscar dispositivos</div>';
+  }
+}
+
+async function sincronizar(i, id, ip, ver) {
+  const nome = (document.getElementById(`nome-${i}`).value.trim()) || id;
+  const msg  = document.getElementById(`msg-dev-${i}`);
+  msg.innerHTML = '<div class="loading"><span class="sp"></span>Sincronizando...</div>';
+  try {
+    const r = await fetch('/dispositivos/sync', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({tuya_device_id:id, site_id:SITE, name:nome, lan_ip:ip, version:ver})
+    });
+    const d = await r.json();
+    msg.innerHTML = d.ok
+      ? `<div class="msg ok">✓ ${esc(d.message||'Sincronizado!')}</div>`
+      : `<div class="msg err">✗ ${esc(d.error||d.erro||'Erro')}</div>`;
+  } catch(e) {
+    msg.innerHTML = '<div class="msg err">Erro de conexao</div>';
+  }
+}
+
+function esc(s) {
+  return String(s||'')
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+</script>
+</body>
+</html>
