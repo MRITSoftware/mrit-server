@@ -1,0 +1,18 @@
+[Unit]
+Description=MRIT Tuya Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mrit
+WorkingDirectory=/home/mrit/mrit-server
+ExecStart=/home/mrit/mrit-server/venv/bin/python tuya_server.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mrit-server
+
+[Install]
+WantedBy=multi-user.target

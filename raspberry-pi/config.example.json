@@ -1,0 +1,16 @@
+{
+    "site_name": "MEU_SITE",
+    "supabase": {
+        "url": "https://SEU-PROJETO.supabase.co",
+        "anon_key": "SUA_SUPABASE_ANON_KEY"
+    },
+    "tuya_accounts": [
+        {
+            "access_id": "SEU_ACCESS_ID",
+            "access_key": "SEU_ACCESS_KEY",
+            "endpoint": "https://openapi.tuyaus.com",
+            "uid": "SEU_UID"
+        }
+    ],
+    "admin_token": ""
+}
