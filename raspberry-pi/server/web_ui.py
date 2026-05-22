@@ -125,7 +125,10 @@ def wifi_connect():
     senha = d.get("senha", "").strip()
     if not ssid:
         return jsonify({"ok": False, "erro": "SSID obrigatorio"})
-    cmd = ["sudo", "nmcli", "device", "wifi", "connect", ssid]
+    # Remove perfil antigo para evitar conflito de configuracao
+    subprocess.run(["sudo", "nmcli", "connection", "delete", ssid],
+                   capture_output=True, text=True, timeout=10)
+    cmd = ["sudo", "nmcli", "device", "wifi", "connect", ssid, "ifname", "wlan0"]
     if senha:
         cmd += ["password", senha]
     rc, out, err = run(cmd, timeout=45)
