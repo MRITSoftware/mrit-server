@@ -33,14 +33,30 @@ echo "      Dependencias instaladas."
 
 echo "[5/6] Configurando config.json..."
 if [ ! -f "$INSTALL_DIR/config.json" ]; then
-    cp "$ROOT_DIR/config.example.json" "$INSTALL_DIR/config.json"
     echo ""
-    echo "  ATENCAO: config.json criado com valores de exemplo."
-    echo "  Edite o arquivo antes de iniciar o servidor:"
-    echo "    nano $INSTALL_DIR/config.json"
+    echo "  Digite o e-mail da unidade (sera usado como site_id):"
+    read -p "  > " SITE_ID
+
+    while [ -z "$SITE_ID" ]; do
+        echo "  ERRO: site_id nao pode ser vazio."
+        read -p "  > " SITE_ID
+    done
+
+    # Gerar config.json com site_id informado e credenciais pre-configuradas
+    python3 -c "
+import json, sys
+template = json.load(open('$ROOT_DIR/config.example.json'))
+template['site_name'] = sys.argv[1]
+json.dump(template, open('$INSTALL_DIR/config.json', 'w'), indent=4, ensure_ascii=False)
+" "$SITE_ID"
+
+    echo ""
+    echo "  config.json criado com site_id = $SITE_ID"
     echo ""
 else
     echo "      config.json ja existe, mantido sem alteracao."
+    SITE_ID=$(python3 -c "import json; print(json.load(open('$INSTALL_DIR/config.json')).get('site_name','?'))")
+    echo "      site_id atual: $SITE_ID"
 fi
 
 echo "[6/6] Instalando servico systemd..."
@@ -51,9 +67,7 @@ sudo systemctl enable "$SERVICE_NAME"
 echo ""
 echo "=== Instalacao concluida! ==="
 echo ""
-echo "Proximos passos:"
-echo "  1. Edite as credenciais: nano $INSTALL_DIR/config.json"
-echo "  2. Inicie o servidor:    sudo systemctl start $SERVICE_NAME"
-echo "  3. Veja os logs:         journalctl -u $SERVICE_NAME -f"
-echo "  4. Status do servico:    sudo systemctl status $SERVICE_NAME"
+echo "  Inicie o servidor:  sudo systemctl start $SERVICE_NAME"
+echo "  Veja os logs:       journalctl -u $SERVICE_NAME -f"
+echo "  Status do servico:  sudo systemctl status $SERVICE_NAME"
 echo ""

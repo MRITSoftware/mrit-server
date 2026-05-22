@@ -1,15 +1,21 @@
 {
-    "site_name": "MEU_SITE",
+    "site_name": "SITE_ID_AQUI",
     "supabase": {
-        "url": "https://SEU-PROJETO.supabase.co",
-        "anon_key": "SUA_SUPABASE_ANON_KEY"
+        "url": "https://kihyhoqbrkwbfudttevo.supabase.co",
+        "anon_key": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtpaHlob3Ficmt3YmZ1ZHR0ZXZvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MTU1NTUwMjcsImV4cCI6MjAzMTEzMTAyN30.XtBTlSiqhsuUIKmhAMEyxofV-dRst7240n912m4O4Us"
     },
     "tuya_accounts": [
         {
-            "access_id": "SEU_ACCESS_ID",
-            "access_key": "SEU_ACCESS_KEY",
+            "access_id": "td7tp3cvq3nrc35emwg3",
+            "access_key": "bbcdaa3dfe9545fca4326fcfa1cf3e2c",
             "endpoint": "https://openapi.tuyaus.com",
-            "uid": "SEU_UID"
+            "uid": "az1715569264750N2mUr"
+        },
+        {
+            "access_id": "wwxsqj37wnfdnp98wu54",
+            "access_key": "d7a140221f3b4e8f916601af4fbd6816",
+            "endpoint": "https://openapi.tuyaus.com",
+            "uid": "az1759235287550HcJRz"
         }
     ],
     "admin_token": ""
