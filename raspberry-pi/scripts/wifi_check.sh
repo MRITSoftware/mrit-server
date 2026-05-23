@@ -1,39 +1,40 @@
 #!/bin/bash
 
-# Verificar se hotspot ja esta ativo
-HOTSPOT_ACTIVE=$(nmcli -t -f NAME,TYPE connection show --active 2>/dev/null | grep ":wifi$" | grep -c "MRIT-Setup")
-if [ "$HOTSPOT_ACTIVE" -gt "0" ]; then
+# Verificar se hotspot ja esta ativo (hostapd rodando)
+if pgrep -f "hostapd.*mrit-hotspot" > /dev/null 2>&1; then
     logger -t mrit-wifi "Hotspot MRIT-Setup ja ativo."
     exit 0
 fi
 
-# Verificar estado do wlan0 especificamente (nao o estado geral do NM)
+# Verificar estado do wlan0 especificamente
 WLAN_STATE=$(nmcli -t -f DEVICE,STATE device 2>/dev/null | grep "^wlan0:" | cut -d: -f2)
 if [ "$WLAN_STATE" = "connected" ]; then
     logger -t mrit-wifi "wlan0 conectado. Hotspot desnecessario."
     exit 0
 fi
 
-logger -t mrit-wifi "wlan0 nao conectado (state: $WLAN_STATE). Ativando hotspot MRIT-Setup..."
+logger -t mrit-wifi "wlan0 nao conectado (state: $WLAN_STATE). Criando hotspot via hostapd..."
 
-# Criar perfil se nao existir
-if ! nmcli connection show MRIT-Setup &>/dev/null; then
-    logger -t mrit-wifi "Criando perfil do hotspot MRIT-Setup..."
-    nmcli connection add \
-        type wifi ifname wlan0 con-name MRIT-Setup ssid "MRIT-Setup" \
-        802-11-wireless.mode ap \
-        802-11-wireless.band bg \
-        802-11-wireless.channel 6 \
-        ipv4.method shared \
-        wifi-sec.key-mgmt wpa-psk \
-        wifi-sec.psk "mrit1234" \
-        autoconnect no
-fi
+# Retirar wlan0 do controle do NM
+nmcli device set wlan0 managed no 2>/dev/null
 
-nmcli connection up MRIT-Setup
+# Atribuir IP fixo ao wlan0
+ip addr flush dev wlan0 2>/dev/null
+ip addr add 10.42.0.1/24 dev wlan0
+ip link set wlan0 up
+
+# Iniciar hostapd em background
+hostapd -B /etc/hostapd/mrit-hotspot.conf -P /run/mrit-hostapd.pid
+sleep 1
+
+# Iniciar dnsmasq para DHCP (apenas na interface wlan0)
+dnsmasq --conf-file=/etc/dnsmasq.d/mrit-hotspot.conf \
+        --pid-file=/run/mrit-dnsmasq.pid \
+        --except-interface=lo
+
 RC=$?
 if [ $RC -eq 0 ]; then
-    logger -t mrit-wifi "Hotspot MRIT-Setup ativo (IP: 10.42.0.1). Acesse http://mrit-pi.local ou http://10.42.0.1"
+    logger -t mrit-wifi "Hotspot MRIT-Setup ativo (IP: 10.42.0.1). Acesse http://10.42.0.1"
 else
-    logger -t mrit-wifi "Falha ao ativar hotspot MRIT-Setup (rc=$RC)"
+    logger -t mrit-wifi "Falha ao iniciar dnsmasq (rc=$RC)"
 fi

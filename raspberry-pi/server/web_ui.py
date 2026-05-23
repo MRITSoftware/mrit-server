@@ -225,6 +225,11 @@ def wifi_connect():
     senha = d.get("senha", "").strip()
     if not ssid:
         return jsonify({"ok": False, "erro": "SSID obrigatorio"})
+    # Parar hotspot se estiver ativo antes de tentar conectar
+    hotspot_stop = os.path.join(BASE_DIR, "scripts", "hotspot_stop.sh")
+    if os.path.exists(hotspot_stop):
+        subprocess.run(["sudo", "bash", hotspot_stop], capture_output=True, timeout=10)
+        time.sleep(2)
     # Remove perfil antigo para evitar conflito de configuracao
     subprocess.run(["sudo", "nmcli", "connection", "delete", ssid],
                    capture_output=True, text=True, timeout=10)

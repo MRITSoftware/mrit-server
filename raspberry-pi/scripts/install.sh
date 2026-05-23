@@ -15,27 +15,29 @@ if [ "$EUID" -eq 0 ]; then
     exit 1
 fi
 
-echo "[1/8] Criando diretorio de instalacao..."
+echo "[1/9] Criando diretorio de instalacao..."
 mkdir -p "$INSTALL_DIR/scripts"
 
-echo "[2/8] Copiando arquivos do servidor..."
+echo "[2/9] Copiando arquivos do servidor..."
 cp "$ROOT_DIR/server/tuya_server.py" "$INSTALL_DIR/"
 cp "$ROOT_DIR/server/web_ui.py" "$INSTALL_DIR/"
 cp -r "$ROOT_DIR/server/templates" "$INSTALL_DIR/"
 cp "$ROOT_DIR/VERSION" "$INSTALL_DIR/"
 cp "$ROOT_DIR/scripts/wifi_check.sh" "$INSTALL_DIR/scripts/"
+cp "$ROOT_DIR/scripts/hotspot_stop.sh" "$INSTALL_DIR/scripts/"
 chmod +x "$INSTALL_DIR/scripts/wifi_check.sh"
+chmod +x "$INSTALL_DIR/scripts/hotspot_stop.sh"
 
-echo "[3/8] Criando ambiente virtual Python..."
+echo "[3/9] Criando ambiente virtual Python..."
 python3 -m venv "$INSTALL_DIR/venv"
 source "$INSTALL_DIR/venv/bin/activate"
 
-echo "[4/8] Instalando dependencias Python..."
+echo "[4/9] Instalando dependencias Python..."
 pip install --upgrade pip --quiet
 pip install -r "$ROOT_DIR/requirements.txt" --quiet
 echo "      Dependencias instaladas."
 
-echo "[5/8] Configurando config.json..."
+echo "[5/9] Configurando config.json..."
 if [ ! -f "$INSTALL_DIR/config.json" ]; then
     echo ""
     echo "  Digite o e-mail da unidade (sera usado como site_id):"
@@ -62,27 +64,28 @@ else
     echo "      site_id atual: $SITE_ID"
 fi
 
-echo "[6/8] Configurando permissoes sudo..."
+echo "[6/9] Configurando permissoes sudo..."
 {
     echo "mrit ALL=(ALL) NOPASSWD: /usr/bin/nmcli"
     echo "mrit ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart mrit-server"
     echo "mrit ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart mrit-webui"
+    echo "mrit ALL=(ALL) NOPASSWD: /sbin/ip"
+    echo "mrit ALL=(ALL) NOPASSWD: /usr/bin/pkill"
+    echo "mrit ALL=(ALL) NOPASSWD: /bin/bash $INSTALL_DIR/scripts/hotspot_stop.sh"
 } | sudo tee /etc/sudoers.d/mrit > /dev/null
 sudo chmod 440 /etc/sudoers.d/mrit
 echo "      Permissoes configuradas."
 
-echo "[7/8] Pre-configurando hotspot de emergencia..."
-sudo nmcli connection delete MRIT-Setup 2>/dev/null || true
-sudo nmcli connection add \
-    type wifi ifname wlan0 con-name MRIT-Setup ssid "MRIT-Setup" \
-    802-11-wireless.mode ap \
-    802-11-wireless.band bg \
-    802-11-wireless.channel 6 \
-    ipv4.method shared \
-    wifi-sec.key-mgmt wpa-psk \
-    wifi-sec.psk "mrit1234" \
-    autoconnect no
-echo "      Perfil MRIT-Setup criado."
+echo "[7/9] Instalando hostapd e dnsmasq para hotspot..."
+sudo apt-get install -y hostapd dnsmasq --quiet
+sudo systemctl disable hostapd 2>/dev/null || true
+sudo systemctl disable dnsmasq 2>/dev/null || true
+sudo systemctl stop hostapd 2>/dev/null || true
+sudo systemctl stop dnsmasq 2>/dev/null || true
+sudo cp "$ROOT_DIR/configs/hostapd.conf" /etc/hostapd/mrit-hotspot.conf
+sudo mkdir -p /etc/dnsmasq.d
+sudo cp "$ROOT_DIR/configs/dnsmasq-hotspot.conf" /etc/dnsmasq.d/mrit-hotspot.conf
+echo "      hostapd e dnsmasq configurados."
 
 echo "[8/9] Instalando servicos systemd..."
 sudo cp "$ROOT_DIR/systemd/mrit-server.service" /etc/systemd/system/
