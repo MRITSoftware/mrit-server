@@ -105,9 +105,24 @@ COMMAND_PREFLIGHT_TIMEOUT_SECONDS = 8
 COMMAND_ACTION_TIMEOUT_SECONDS = 20
 REFRESH_FAIL_COUNTS: Dict[str, int] = {}
 REFRESH_LAST_STATUS: Dict[str, bool] = {}
-APP_VERSION = "1.0"
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _read_app_version() -> str:
+    """Usa o hash curto do commit git como versão. Reflete OTA automaticamente."""
+    try:
+        r = subprocess.run(
+            ["git", "-C", BASE_DIR, "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+    except Exception:
+        pass
+    return "unknown"
+
+
+APP_VERSION = _read_app_version()
 
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 DEVICES_CACHE_PATH = os.path.join(BASE_DIR, "devices_cache.json")
