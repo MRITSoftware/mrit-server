@@ -129,6 +129,25 @@ input:focus{border-color:#38bdf8}
       <div class="hint">Ao salvar, o servidor reinicia automaticamente em ~5 segundos.</div>
     </div>
     <div class="card">
+      <h3>Backup e Restauracao</h3>
+      <p style="font-size:13px;color:#94a3b8;margin-bottom:14px">
+        Exporte o config para guardar ou transferir para outro Pi.
+      </p>
+      <a href="/config/export" class="btn btn-primary btn-full"
+         style="text-align:center;display:block;text-decoration:none;margin-bottom:10px">
+        Exportar config.json
+      </a>
+      <label>Importar config.json</label>
+      <form id="form-import" style="display:flex;gap:8px;align-items:center">
+        <input type="file" id="file-import" accept=".json"
+               style="flex:1;padding:8px;background:#0f172a;border:1.5px solid #334155;
+                      border-radius:8px;color:#f1f5f9;font-size:13px">
+        <button type="submit" class="btn btn-primary">Importar</button>
+      </form>
+      <div id="msg-import"></div>
+    </div>
+
+    <div class="card">
       <h3>Atualizacao do Sistema (OTA)</h3>
       <p style="font-size:13px;color:#94a3b8;margin-bottom:14px">
         Busca a versao mais recente do GitHub e reinicia os servicos automaticamente.
@@ -353,6 +372,26 @@ function esc(s) {
     .replace(/&/g,'&amp;').replace(/</g,'&lt;')
     .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
+
+// ── Import config ────────────────────────────────────────────────────────────
+document.getElementById('form-import').addEventListener('submit', async function(e) {
+  e.preventDefault();
+  const file = document.getElementById('file-import').files[0];
+  const msg  = document.getElementById('msg-import');
+  if (!file) { msg.innerHTML = '<div class="msg err">Selecione um arquivo</div>'; return; }
+  const fd = new FormData();
+  fd.append('config', file);
+  msg.innerHTML = '<div class="loading"><span class="sp"></span>Importando...</div>';
+  try {
+    const r = await fetch('/config/import', { method: 'POST', body: fd });
+    const d = await r.json();
+    msg.innerHTML = d.ok
+      ? `<div class="msg ok">✓ ${esc(d.msg)}</div>`
+      : `<div class="msg err">✗ ${esc(d.erro)}</div>`;
+  } catch(e) {
+    msg.innerHTML = '<div class="msg err">Erro ao importar</div>';
+  }
+});
 
 // ── OTA ──────────────────────────────────────────────────────────────────────
 async function otaUpdate() {

@@ -110,6 +110,40 @@ def set_site():
     return redirect("/painel#config")
 
 
+# ── config export / import ───────────────────────────────────────────────────
+
+@app.route("/config/export")
+@login_required
+def config_export():
+    data = json.dumps(cfg_load(), indent=4, ensure_ascii=False)
+    return app.response_class(
+        response=data,
+        status=200,
+        mimetype="application/json",
+        headers={"Content-Disposition": "attachment; filename=config.json"}
+    )
+
+@app.route("/config/import", methods=["POST"])
+@login_required
+def config_import():
+    f = request.files.get("config")
+    if not f:
+        return jsonify({"ok": False, "erro": "Nenhum arquivo enviado"})
+    try:
+        c = json.load(f)
+        if not isinstance(c, dict):
+            raise ValueError("JSON invalido")
+        if not c.get("supabase", {}).get("url"):
+            raise ValueError("Campo supabase.url ausente")
+        if not c.get("site_name"):
+            raise ValueError("Campo site_name ausente")
+        cfg_save(c)
+        subprocess.Popen(["sudo", "systemctl", "restart", "mrit-server"])
+        return jsonify({"ok": True, "msg": "Config importado. Servidor reiniciando..."})
+    except Exception as e:
+        return jsonify({"ok": False, "erro": str(e)})
+
+
 # ── OTA update ───────────────────────────────────────────────────────────────
 
 @app.route("/ota/atualizar", methods=["POST"])
