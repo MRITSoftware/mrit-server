@@ -2583,8 +2583,32 @@ def remote_command_listener_loop() -> None:
 
         time.sleep(REMOTE_COMMAND_RECONNECT_SECONDS)
 
+def _poll_admin_commands_once() -> None:
+    """Verifica e processa comandos admin pendentes para este site (uma passagem)."""
+    if not REQUESTS_AVAILABLE or not SUPABASE_CONFIG.get("url"):
+        return
+    try:
+        base_url = get_supabase_url()
+        headers = get_supabase_headers()
+        resp = requests.get(
+            f"{base_url}/{ADMIN_COMMAND_TABLE}"
+            f"?site_name=eq.{SITE_NAME}&status=eq.pendente"
+            f"&order=created_at.asc&limit=5",
+            headers=headers, timeout=15
+        )
+        if resp.status_code == 200:
+            for cmd in resp.json():
+                try:
+                    _process_admin_command(cmd)
+                except Exception as e:
+                    log(f"[ADMIN] Erro em cmd: {e}")
+    except Exception as e:
+        log(f"[ADMIN] Erro no poll: {e}")
+
+
 def start_heartbeat_loop() -> None:
-    """Envia heartbeat para todos os dispositivos no cache a cada 15 minutos."""
+    """Envia heartbeat para todos os dispositivos no cache a cada 15 minutos.
+    Também verifica comandos admin remotos no mesmo ciclo (sem thread extra)."""
     def loop():
         log(f"[HEARTBEAT] Loop iniciado (intervalo: {HEARTBEAT_INTERVAL_SECONDS}s)")
         while True:
@@ -2594,14 +2618,16 @@ def start_heartbeat_loop() -> None:
                 devices = {k: v for k, v in cache.items() if not k.startswith("_")}
                 if not devices:
                     log("[HEARTBEAT] Nenhum dispositivo no cache")
-                    continue
-                ssid = get_wifi_ssid()
-                for device_id in devices:
-                    success = update_device_heartbeat(device_id, wifi_ssid=ssid)
-                    status = "OK" if success else "FALHA"
-                    log(f"[HEARTBEAT] {status} {device_id}" + (f" (ssid={ssid})" if ssid else ""))
+                else:
+                    ssid = get_wifi_ssid()
+                    for device_id in devices:
+                        success = update_device_heartbeat(device_id, wifi_ssid=ssid)
+                        status = "OK" if success else "FALHA"
+                        log(f"[HEARTBEAT] {status} {device_id}" + (f" (ssid={ssid})" if ssid else ""))
             except Exception as e:
                 log(f"[HEARTBEAT] Erro no loop: {e}")
+            # Verifica comandos admin no mesmo ciclo — sem thread extra
+            _poll_admin_commands_once()
     threading.Thread(target=loop, daemon=True).start()
 
 
@@ -2983,7 +3009,6 @@ def api_sync_devices():
 # =========================
 
 ADMIN_COMMAND_TABLE = "servidor_admin_commands"
-ADMIN_COMMAND_POLL_SECONDS = 30
 
 
 def _admin_ota() -> str:
@@ -3110,36 +3135,6 @@ def _process_admin_command(cmd: Dict[str, Any]) -> None:
         })
 
 
-def start_admin_command_listener() -> None:
-    """Polling periódico para comandos admin enviados via Supabase."""
-    def loop():
-        log(f"[ADMIN] Listener iniciado (poll a cada {ADMIN_COMMAND_POLL_SECONDS}s, site={SITE_NAME})")
-        while True:
-            try:
-                if REQUESTS_AVAILABLE and SUPABASE_CONFIG.get("url"):
-                    base_url = get_supabase_url()
-                    headers = get_supabase_headers()
-                    url = (
-                        f"{base_url}/{ADMIN_COMMAND_TABLE}"
-                        f"?site_name=eq.{SITE_NAME}"
-                        f"&status=eq.pendente"
-                        f"&order=created_at.asc"
-                        f"&limit=5"
-                    )
-                    resp = requests.get(url, headers=headers, timeout=15)
-                    if resp.status_code == 200:
-                        for cmd in resp.json():
-                            try:
-                                _process_admin_command(cmd)
-                            except Exception as e:
-                                log(f"[ADMIN] Erro em cmd: {e}")
-            except Exception as e:
-                log(f"[ADMIN] Erro no loop: {e}")
-            time.sleep(ADMIN_COMMAND_POLL_SECONDS)
-
-    threading.Thread(target=loop, daemon=True).start()
-
-
 def start_server(host="0.0.0.0", port=8000):
     """Inicia o servidor Flask"""
     log(f"[START] Servidor Tuya local rodando em http://{host}:{port} (SITE={SITE_NAME})")
@@ -3151,8 +3146,7 @@ def start_server(host="0.0.0.0", port=8000):
     start_heartbeat_loop()
     # Escutar comandos remotos em tempo real sem polling REST contínuo
     start_remote_command_listener()
-    # Listener de comandos admin remotos (OTA, restart, logs, status)
-    start_admin_command_listener()
+    # Comandos admin (OTA/restart/logs) são verificados dentro do heartbeat loop
     app.run(host=host, port=port, debug=False, use_reloader=False)
 
 
