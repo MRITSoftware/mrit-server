@@ -106,6 +106,7 @@ input:focus{border-color:#38bdf8}
   <button class="tab-btn active" onclick="tab('config',this)">Configuracao</button>
   <button class="tab-btn" onclick="tab('wifi',this)">WiFi</button>
   <button class="tab-btn" onclick="tab('devices',this)">Dispositivos</button>
+  <button class="tab-btn" onclick="tab('logs',this)">Logs</button>
 </div>
 
 <div class="content">
@@ -126,6 +127,16 @@ input:focus{border-color:#38bdf8}
         </div>
       </form>
       <div class="hint">Ao salvar, o servidor reinicia automaticamente em ~5 segundos.</div>
+    </div>
+    <div class="card">
+      <h3>Atualizacao do Sistema (OTA)</h3>
+      <p style="font-size:13px;color:#94a3b8;margin-bottom:14px">
+        Busca a versao mais recente do GitHub e reinicia os servicos automaticamente.
+      </p>
+      <button class="btn btn-success btn-full" onclick="otaUpdate()">
+        Atualizar Servidor
+      </button>
+      <div id="msg-ota"></div>
     </div>
   </div>
 
@@ -163,6 +174,27 @@ input:focus{border-color:#38bdf8}
              style="margin-bottom:14px">
       <button class="btn btn-success btn-full" onclick="conectar()">Conectar</button>
       <div id="msg-wifi"></div>
+    </div>
+  </div>
+
+  <!-- LOGS -->
+  <div id="s-logs" class="section">
+    <div class="card">
+      <h3>Visualizar Logs</h3>
+      <div style="display:flex;gap:8px;margin-bottom:14px">
+        <button class="btn btn-primary btn-sm" onclick="verLog('mrit-server')" style="flex:1">
+          Servidor Principal
+        </button>
+        <button class="btn btn-primary btn-sm" onclick="verLog('mrit-webui')" style="flex:1">
+          Painel Web
+        </button>
+      </div>
+      <div id="log-box" style="display:none">
+        <div id="log-title" style="font-size:11px;color:#64748b;margin-bottom:8px;font-weight:600;text-transform:uppercase;letter-spacing:1px"></div>
+        <pre id="log-content" style="background:#0a0f1a;border:1px solid #1e3a5f;border-radius:8px;
+             padding:12px;font-size:11px;color:#94a3b8;overflow-x:auto;
+             max-height:420px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;line-height:1.5"></pre>
+      </div>
     </div>
   </div>
 
@@ -320,6 +352,42 @@ function esc(s) {
   return String(s||'')
     .replace(/&/g,'&amp;').replace(/</g,'&lt;')
     .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── OTA ──────────────────────────────────────────────────────────────────────
+async function otaUpdate() {
+  const msg = document.getElementById('msg-ota');
+  msg.innerHTML = '<div class="loading"><span class="sp"></span>Atualizando... isso pode levar 30s.</div>';
+  try {
+    const r = await fetch('/ota/atualizar', {method:'POST'});
+    const d = await r.json();
+    if (d.ok) {
+      msg.innerHTML = `<div class="msg ok">✓ ${esc(d.msg)}<br><small>Tentando reconectar em 12s...</small></div>`;
+      setTimeout(() => { location.reload(); }, 12000);
+    } else {
+      msg.innerHTML = `<div class="msg err">✗ ${esc(d.erro||'Erro')}</div>`;
+    }
+  } catch(e) {
+    msg.innerHTML = '<div class="msg err">Erro ao iniciar atualização</div>';
+  }
+}
+
+// ── Logs ─────────────────────────────────────────────────────────────────────
+async function verLog(service) {
+  const box = document.getElementById('log-box');
+  const title = document.getElementById('log-title');
+  const content = document.getElementById('log-content');
+  box.style.display = '';
+  title.textContent = service === 'mrit-server' ? 'Servidor Principal' : 'Painel Web';
+  content.textContent = 'Carregando...';
+  try {
+    const r = await fetch(`/logs/${service}`);
+    const d = await r.json();
+    content.textContent = d.logs || '(sem logs)';
+    content.scrollTop = content.scrollHeight;
+  } catch(e) {
+    content.textContent = 'Erro ao carregar logs.';
+  }
 }
 </script>
 </body>

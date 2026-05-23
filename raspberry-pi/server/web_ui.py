@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """MRIT Server - Interface Web de Configuracao"""
 
-import os, json, hashlib, subprocess
+import os, json, hashlib, subprocess, threading, time, shutil
 from functools import wraps
 from flask import Flask, render_template, request, redirect, url_for, session, jsonify
 
@@ -17,6 +17,16 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 API = "http://127.0.0.1:8000"
 _HASH = hashlib.sha256("MRITSERVER#REDEGELAFIT".encode()).hexdigest()
+_LOGIN_FAILS: dict = {}  # ip -> [timestamps]
+
+
+def _rate_limited(ip: str) -> bool:
+    now = time.time()
+    _LOGIN_FAILS[ip] = [t for t in _LOGIN_FAILS.get(ip, []) if now - t < 300]
+    return len(_LOGIN_FAILS.get(ip, [])) >= 5
+
+def _record_fail(ip: str) -> None:
+    _LOGIN_FAILS.setdefault(ip, []).append(time.time())
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -56,12 +66,17 @@ def login_required(f):
 @app.route("/", methods=["GET", "POST"])
 def login():
     err = None
+    ip = request.remote_addr or "unknown"
     if request.method == "POST":
-        pwd = request.form.get("password", "")
-        if hashlib.sha256(pwd.encode()).hexdigest() == _HASH:
-            session["ok"] = True
-            return redirect(url_for("dashboard"))
-        err = "Senha incorreta"
+        if _rate_limited(ip):
+            err = "Muitas tentativas incorretas. Aguarde 5 minutos."
+        else:
+            pwd = request.form.get("password", "")
+            if hashlib.sha256(pwd.encode()).hexdigest() == _HASH:
+                session["ok"] = True
+                return redirect(url_for("dashboard"))
+            _record_fail(ip)
+            err = "Senha incorreta"
     return render_template("login.html", error=err)
 
 @app.route("/sair")
@@ -93,6 +108,54 @@ def set_site():
         cfg_save(c)
         subprocess.Popen(["sudo", "systemctl", "restart", "mrit-server"])
     return redirect("/painel#config")
+
+
+# ── OTA update ───────────────────────────────────────────────────────────────
+
+@app.route("/ota/atualizar", methods=["POST"])
+@login_required
+def ota_update():
+    def _do():
+        time.sleep(1)
+        try:
+            r = subprocess.run(
+                ["git", "-C", BASE_DIR, "pull", "--ff-only"],
+                capture_output=True, text=True, timeout=60
+            )
+            if r.returncode == 0:
+                src = os.path.join(BASE_DIR, "raspberry-pi", "server")
+                if os.path.isdir(src):
+                    for f in ["tuya_server.py", "web_ui.py"]:
+                        s = os.path.join(src, f)
+                        if os.path.exists(s):
+                            shutil.copy2(s, BASE_DIR)
+                    tpl_s = os.path.join(src, "templates")
+                    tpl_d = os.path.join(BASE_DIR, "templates")
+                    if os.path.isdir(tpl_s):
+                        shutil.copytree(tpl_s, tpl_d, dirs_exist_ok=True)
+            subprocess.run(["sudo", "systemctl", "restart", "mrit-server"],
+                           capture_output=True, timeout=15)
+            time.sleep(2)
+            subprocess.run(["sudo", "systemctl", "restart", "mrit-webui"],
+                           capture_output=True, timeout=15)
+        except Exception:
+            pass
+    threading.Thread(target=_do, daemon=True).start()
+    return jsonify({"ok": True, "msg": "Atualização iniciada. O painel reiniciará em instantes."})
+
+
+# ── logs ─────────────────────────────────────────────────────────────────────
+
+@app.route("/logs/<service>")
+@login_required
+def view_logs(service):
+    if service not in ("mrit-server", "mrit-webui"):
+        return jsonify({"ok": False, "erro": "Serviço inválido"})
+    _, out, err = run(
+        ["journalctl", "-u", service, "-n", "150", "--no-pager", "--output=short-iso"],
+        timeout=15
+    )
+    return jsonify({"ok": True, "logs": out or err})
 
 
 # ── wifi ─────────────────────────────────────────────────────────────────────

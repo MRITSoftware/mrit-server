@@ -62,8 +62,11 @@ else
 fi
 
 echo "[6/8] Configurando permissoes sudo..."
-echo "mrit ALL=(ALL) NOPASSWD: /usr/bin/nmcli" | sudo tee /etc/sudoers.d/mrit > /dev/null
-echo "mrit ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart mrit-server" | sudo tee -a /etc/sudoers.d/mrit > /dev/null
+{
+    echo "mrit ALL=(ALL) NOPASSWD: /usr/bin/nmcli"
+    echo "mrit ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart mrit-server"
+    echo "mrit ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart mrit-webui"
+} | sudo tee /etc/sudoers.d/mrit > /dev/null
 sudo chmod 440 /etc/sudoers.d/mrit
 echo "      Permissoes configuradas."
 
@@ -71,13 +74,14 @@ echo "[7/8] Instalando servicos systemd..."
 sudo cp "$ROOT_DIR/systemd/mrit-server.service" /etc/systemd/system/
 sudo cp "$ROOT_DIR/systemd/mrit-webui.service" /etc/systemd/system/
 sudo cp "$ROOT_DIR/systemd/mrit-wifi-check.service" /etc/systemd/system/
+sudo cp "$ROOT_DIR/systemd/mrit-wifi-check.timer" /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable mrit-server mrit-webui mrit-wifi-check
+sudo systemctl enable mrit-server mrit-webui mrit-wifi-check.timer
 echo "      Servicos habilitados."
 
 echo "[8/8] Iniciando servicos..."
 sudo systemctl start mrit-webui
-sudo systemctl start mrit-wifi-check
+sudo systemctl start mrit-wifi-check.timer
 sudo systemctl start mrit-server
 
 echo ""

@@ -7,6 +7,7 @@ import threading
 import time
 import socket
 import subprocess
+import shutil
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone
 from urllib.parse import urlencode, urlparse
@@ -2977,6 +2978,168 @@ def api_sync_devices():
         traceback.print_exc()
         return jsonify({"ok": False, "error": err}), 500
 
+# =========================
+# ADMIN COMMANDS (remoto via Supabase)
+# =========================
+
+ADMIN_COMMAND_TABLE = "servidor_admin_commands"
+ADMIN_COMMAND_POLL_SECONDS = 30
+
+
+def _admin_ota() -> str:
+    r = subprocess.run(
+        ["git", "-C", BASE_DIR, "pull", "--ff-only"],
+        capture_output=True, text=True, timeout=60
+    )
+    if r.returncode != 0:
+        raise RuntimeError(f"git pull falhou: {r.stderr.strip()}")
+    git_out = r.stdout.strip()
+    src_dir = os.path.join(BASE_DIR, "raspberry-pi", "server")
+    copied = []
+    if os.path.isdir(src_dir):
+        for fname in ["tuya_server.py", "web_ui.py"]:
+            src = os.path.join(src_dir, fname)
+            if os.path.exists(src):
+                shutil.copy2(src, BASE_DIR)
+                copied.append(fname)
+        tpl_s = os.path.join(src_dir, "templates")
+        tpl_d = os.path.join(BASE_DIR, "templates")
+        if os.path.isdir(tpl_s):
+            shutil.copytree(tpl_s, tpl_d, dirs_exist_ok=True)
+            copied.append("templates/")
+
+    def _restart():
+        time.sleep(3)
+        subprocess.run(["sudo", "systemctl", "restart", "mrit-server"],
+                       capture_output=True, timeout=15)
+        time.sleep(2)
+        subprocess.run(["sudo", "systemctl", "restart", "mrit-webui"],
+                       capture_output=True, timeout=15)
+    threading.Thread(target=_restart, daemon=True).start()
+    files = ", ".join(copied) if copied else "já atualizado"
+    return f"git: {git_out}. Arquivos: {files}. Serviços reiniciando..."
+
+
+def _admin_restart() -> str:
+    def _do():
+        time.sleep(2)
+        subprocess.run(["sudo", "systemctl", "restart", "mrit-server"],
+                       capture_output=True, timeout=15)
+        time.sleep(2)
+        subprocess.run(["sudo", "systemctl", "restart", "mrit-webui"],
+                       capture_output=True, timeout=15)
+    threading.Thread(target=_do, daemon=True).start()
+    return "Serviços sendo reiniciados..."
+
+
+def _admin_logs() -> str:
+    r = subprocess.run(
+        ["journalctl", "-u", "mrit-server", "-n", "100", "--no-pager", "--output=short-iso"],
+        capture_output=True, text=True, timeout=15
+    )
+    return (r.stdout or r.stderr)[-3000:]
+
+
+def _admin_status() -> str:
+    cache = load_devices_cache()
+    devices = [k for k in cache.keys() if not k.startswith("_")]
+    return json.dumps({
+        "site": SITE_NAME,
+        "version": APP_VERSION,
+        "devices": len(devices),
+        "wifi_ssid": get_wifi_ssid(),
+        "timestamp": current_timestamp_iso()
+    })
+
+
+def _patch_admin(cmd_id: Any, payload: Dict[str, Any]) -> None:
+    try:
+        base_url = get_supabase_url()
+        headers = {**get_supabase_headers(), "Prefer": "return=minimal"}
+        requests.patch(
+            f"{base_url}/{ADMIN_COMMAND_TABLE}?id=eq.{cmd_id}",
+            json=payload, headers=headers, timeout=10
+        )
+    except Exception as e:
+        log(f"[ADMIN] Erro ao atualizar cmd {cmd_id}: {e}")
+
+
+def _process_admin_command(cmd: Dict[str, Any]) -> None:
+    cmd_id = cmd.get("id")
+    comando = cmd.get("comando", "")
+    log(f"[ADMIN] Processando comando {cmd_id}: {comando}")
+    try:
+        base_url = get_supabase_url()
+        headers = {**get_supabase_headers(), "Prefer": "return=representation"}
+        claim_resp = requests.patch(
+            f"{base_url}/{ADMIN_COMMAND_TABLE}?id=eq.{cmd_id}&status=eq.pendente",
+            json={"status": "executando", "iniciado_em": current_timestamp_iso()},
+            headers=headers, timeout=10
+        )
+        if not claim_resp.json():
+            log(f"[ADMIN] Comando {cmd_id} já foi reivindicado")
+            return
+    except Exception as e:
+        log(f"[ADMIN] Erro ao reivindicar {cmd_id}: {e}")
+        return
+
+    try:
+        if comando == "ota_update":
+            resultado = _admin_ota()
+        elif comando == "reiniciar":
+            resultado = _admin_restart()
+        elif comando == "logs":
+            resultado = _admin_logs()
+        elif comando == "status":
+            resultado = _admin_status()
+        else:
+            resultado = f"Comando desconhecido: {comando}"
+
+        _patch_admin(cmd_id, {
+            "status": "concluido",
+            "resultado": resultado[:3000],
+            "concluido_em": current_timestamp_iso()
+        })
+        log(f"[ADMIN] Comando {cmd_id} ({comando}) concluído")
+    except Exception as e:
+        log(f"[ADMIN] Erro ao executar {cmd_id}: {e}")
+        _patch_admin(cmd_id, {
+            "status": "erro",
+            "resultado": str(e)[:3000],
+            "concluido_em": current_timestamp_iso()
+        })
+
+
+def start_admin_command_listener() -> None:
+    """Polling periódico para comandos admin enviados via Supabase."""
+    def loop():
+        log(f"[ADMIN] Listener iniciado (poll a cada {ADMIN_COMMAND_POLL_SECONDS}s, site={SITE_NAME})")
+        while True:
+            try:
+                if REQUESTS_AVAILABLE and SUPABASE_CONFIG.get("url"):
+                    base_url = get_supabase_url()
+                    headers = get_supabase_headers()
+                    url = (
+                        f"{base_url}/{ADMIN_COMMAND_TABLE}"
+                        f"?site_name=eq.{SITE_NAME}"
+                        f"&status=eq.pendente"
+                        f"&order=created_at.asc"
+                        f"&limit=5"
+                    )
+                    resp = requests.get(url, headers=headers, timeout=15)
+                    if resp.status_code == 200:
+                        for cmd in resp.json():
+                            try:
+                                _process_admin_command(cmd)
+                            except Exception as e:
+                                log(f"[ADMIN] Erro em cmd: {e}")
+            except Exception as e:
+                log(f"[ADMIN] Erro no loop: {e}")
+            time.sleep(ADMIN_COMMAND_POLL_SECONDS)
+
+    threading.Thread(target=loop, daemon=True).start()
+
+
 def start_server(host="0.0.0.0", port=8000):
     """Inicia o servidor Flask"""
     log(f"[START] Servidor Tuya local rodando em http://{host}:{port} (SITE={SITE_NAME})")
@@ -2988,6 +3151,8 @@ def start_server(host="0.0.0.0", port=8000):
     start_heartbeat_loop()
     # Escutar comandos remotos em tempo real sem polling REST contínuo
     start_remote_command_listener()
+    # Listener de comandos admin remotos (OTA, restart, logs, status)
+    start_admin_command_listener()
     app.run(host=host, port=port, debug=False, use_reloader=False)
 
 

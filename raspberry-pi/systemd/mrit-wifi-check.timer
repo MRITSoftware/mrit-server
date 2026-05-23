@@ -1,0 +1,11 @@
+[Unit]
+Description=MRIT WiFi Check - Verificacao periodica a cada 5 minutos
+After=NetworkManager.service
+
+[Timer]
+OnBootSec=30sec
+OnUnitActiveSec=5min
+Unit=mrit-wifi-check.service
+
+[Install]
+WantedBy=timers.target
