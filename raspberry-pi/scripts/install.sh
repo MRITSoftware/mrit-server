@@ -71,7 +71,20 @@ echo "[6/8] Configurando permissoes sudo..."
 sudo chmod 440 /etc/sudoers.d/mrit
 echo "      Permissoes configuradas."
 
-echo "[7/8] Instalando servicos systemd..."
+echo "[7/8] Pre-configurando hotspot de emergencia..."
+sudo nmcli connection delete MRIT-Setup 2>/dev/null || true
+sudo nmcli connection add \
+    type wifi ifname wlan0 con-name MRIT-Setup ssid "MRIT-Setup" \
+    802-11-wireless.mode ap \
+    802-11-wireless.band bg \
+    802-11-wireless.channel 6 \
+    ipv4.method shared \
+    wifi-sec.key-mgmt wpa-psk \
+    wifi-sec.psk "mrit1234" \
+    autoconnect no
+echo "      Perfil MRIT-Setup criado."
+
+echo "[8/9] Instalando servicos systemd..."
 sudo cp "$ROOT_DIR/systemd/mrit-server.service" /etc/systemd/system/
 sudo cp "$ROOT_DIR/systemd/mrit-webui.service" /etc/systemd/system/
 sudo cp "$ROOT_DIR/systemd/mrit-wifi-check.service" /etc/systemd/system/
@@ -80,7 +93,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable mrit-server mrit-webui mrit-wifi-check.timer
 echo "      Servicos habilitados."
 
-echo "[8/8] Iniciando servicos..."
+echo "[9/9] Iniciando servicos..."
 sudo systemctl start mrit-webui
 sudo systemctl start mrit-wifi-check.timer
 sudo systemctl start mrit-server

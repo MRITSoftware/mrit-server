@@ -14,11 +14,26 @@ if [ "$WLAN_STATE" = "connected" ]; then
     exit 0
 fi
 
-logger -t mrit-wifi "wlan0 nao conectado (state: $WLAN_STATE). Criando hotspot MRIT-Setup..."
-nmcli device wifi hotspot ifname wlan0 ssid "MRIT-Setup" password "mrit1234"
+logger -t mrit-wifi "wlan0 nao conectado (state: $WLAN_STATE). Ativando hotspot MRIT-Setup..."
+
+# Criar perfil se nao existir
+if ! nmcli connection show MRIT-Setup &>/dev/null; then
+    logger -t mrit-wifi "Criando perfil do hotspot MRIT-Setup..."
+    nmcli connection add \
+        type wifi ifname wlan0 con-name MRIT-Setup ssid "MRIT-Setup" \
+        802-11-wireless.mode ap \
+        802-11-wireless.band bg \
+        802-11-wireless.channel 6 \
+        ipv4.method shared \
+        wifi-sec.key-mgmt wpa-psk \
+        wifi-sec.psk "mrit1234" \
+        autoconnect no
+fi
+
+nmcli connection up MRIT-Setup
 RC=$?
 if [ $RC -eq 0 ]; then
     logger -t mrit-wifi "Hotspot MRIT-Setup ativo (IP: 10.42.0.1). Acesse http://mrit-pi.local ou http://10.42.0.1"
 else
-    logger -t mrit-wifi "Falha ao criar hotspot MRIT-Setup (rc=$RC)"
+    logger -t mrit-wifi "Falha ao ativar hotspot MRIT-Setup (rc=$RC)"
 fi
