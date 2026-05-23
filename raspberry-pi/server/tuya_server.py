@@ -80,6 +80,7 @@ DEFAULT_TUYA_ACCOUNTS = [
 # Refresh periódico para manter comunicação com a placa
 DEVICE_REFRESH_INTERVAL_SECONDS = 5 * 60  # 5 minutos
 DEVICE_REFRESH_RETRY_ON_FAILURE_SECONDS = 60  # 1 minuto quando houver falha
+HEARTBEAT_INTERVAL_SECONDS = 15 * 60  # 15 minutos
 COMMAND_MAX_RETRIES = 3
 COMMAND_RETRY_DELAY_SECONDS = 1
 COMMAND_PREFLIGHT_TIMEOUT_SECONDS = 8
@@ -2558,6 +2559,27 @@ def remote_command_listener_loop() -> None:
 
         time.sleep(REMOTE_COMMAND_RECONNECT_SECONDS)
 
+def start_heartbeat_loop() -> None:
+    """Envia heartbeat para todos os dispositivos no cache a cada 15 minutos."""
+    def loop():
+        log(f"[HEARTBEAT] Loop iniciado (intervalo: {HEARTBEAT_INTERVAL_SECONDS}s)")
+        while True:
+            time.sleep(HEARTBEAT_INTERVAL_SECONDS)
+            try:
+                cache = load_devices_cache()
+                devices = {k: v for k, v in cache.items() if not k.startswith("_")}
+                if not devices:
+                    log("[HEARTBEAT] Nenhum dispositivo no cache")
+                    continue
+                for device_id in devices:
+                    success = update_device_heartbeat(device_id)
+                    status = "OK" if success else "FALHA"
+                    log(f"[HEARTBEAT] {status} {device_id}")
+            except Exception as e:
+                log(f"[HEARTBEAT] Erro no loop: {e}")
+    threading.Thread(target=loop, daemon=True).start()
+
+
 def start_remote_command_listener() -> None:
     """Inicia o listener Realtime uma única vez."""
     global REMOTE_COMMAND_LISTENER_STARTED
@@ -2937,6 +2959,8 @@ def start_server(host="0.0.0.0", port=8000):
     scan_and_print_devices()
     # Iniciar refresh periódico
     start_device_refresh_loop()
+    # Heartbeat a cada 15 minutos
+    start_heartbeat_loop()
     # Escutar comandos remotos em tempo real sem polling REST contínuo
     start_remote_command_listener()
     app.run(host=host, port=port, debug=False, use_reloader=False)

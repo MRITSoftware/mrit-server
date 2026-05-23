@@ -159,8 +159,13 @@ def _wifi_status():
 @app.route("/dispositivos/buscar")
 @login_required
 def dev_discover():
-    d = api_call("get", "/tuya/devices")
-    return jsonify(d or {"ok": False, "erro": "Servidor principal offline"})
+    if not _req:
+        return jsonify({"ok": False, "erro": "requests nao disponivel"})
+    try:
+        r = _req.get(f"{API}/tuya/devices", timeout=35)
+        return jsonify(r.json())
+    except Exception as e:
+        return jsonify({"ok": False, "erro": f"Servidor offline: {e}"})
 
 @app.route("/dispositivos/sync", methods=["POST"])
 @login_required
