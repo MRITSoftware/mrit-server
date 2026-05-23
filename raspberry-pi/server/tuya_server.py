@@ -109,25 +109,12 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def _read_app_version() -> str:
-    """Lê o prefixo do arquivo VERSION e anexa o hash curto do commit git.
-    Resultado: '1.0-PI-a1b2c3d'. Reflete OTA automaticamente."""
-    prefix = "PI"
+    """Lê a versão do arquivo VERSION (ex: '1.0-PI'). Atualiza com OTA."""
     version_file = os.path.join(BASE_DIR, "VERSION")
-    if os.path.exists(version_file):
-        try:
-            prefix = open(version_file).read().strip()
-        except Exception:
-            pass
     try:
-        r = subprocess.run(
-            ["git", "-C", BASE_DIR, "rev-parse", "--short", "HEAD"],
-            capture_output=True, text=True, timeout=5
-        )
-        if r.returncode == 0 and r.stdout.strip():
-            return f"{prefix}-{r.stdout.strip()}"
+        return open(version_file).read().strip()
     except Exception:
-        pass
-    return prefix
+        return "PI"
 
 
 APP_VERSION = _read_app_version()
