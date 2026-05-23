@@ -57,7 +57,7 @@ foreach ($t in $targets) {
         Write-Host "  [OK] $t" -ForegroundColor Green
         $ok++
     } catch {
-        Write-Host "  [ERRO] $t — $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "  [ERRO] $t - $($_.Exception.Message)" -ForegroundColor Red
     }
 }
 
