@@ -27,7 +27,7 @@ if ($Site) {
     Write-Host "Buscando unidades cadastradas..." -ForegroundColor Cyan
     try {
         $devs = Invoke-RestMethod `
-            -Uri "$SUPABASE_URL/rest/v1/tuya_devices?select=site_id&site_id=not.is.null" `
+            -Uri ($SUPABASE_URL + "/rest/v1/tuya_devices?select=site_id&site_id=not.is.null") `
             -Headers $authHeaders
         $targets = $devs |
             Select-Object -ExpandProperty site_id -Unique |
@@ -52,7 +52,7 @@ foreach ($t in $targets) {
     try {
         $body = @{ site_name = $t; comando = "ota_update" } | ConvertTo-Json -Compress
         Invoke-RestMethod `
-            -Uri "$SUPABASE_URL/rest/v1/servidor_admin_commands" `
+            -Uri ($SUPABASE_URL + "/rest/v1/servidor_admin_commands") `
             -Method POST -Headers $postHeaders -Body $body | Out-Null
         Write-Host "  [OK] $t" -ForegroundColor Green
         $ok++

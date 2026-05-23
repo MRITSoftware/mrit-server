@@ -16,11 +16,12 @@ $headers = @{
 }
 
 $now = [DateTime]::UtcNow
+$BASE = $SUPABASE_URL + "/rest/v1"
 
 # -- Servidores --------------------------------------------------------------
-$devsUri = "$SUPABASE_URL/rest/v1/tuya_devices?select=site_id,versao,servidor_online,wifi_ssid,wifi_speed"
-if ($Site) { $devsUri += "&site_id=eq.$Site" }
-$devsUri += "&order=servidor_online.desc.nullslast"
+$devsUri = $BASE + "/tuya_devices?select=site_id,versao,servidor_online,wifi_ssid,wifi_speed"
+if ($Site) { $devsUri = $devsUri + "&site_id=eq." + $Site }
+$devsUri = $devsUri + "&order=servidor_online.desc.nullslast"
 
 try {
     $devs = Invoke-RestMethod -Uri $devsUri -Headers $headers
@@ -31,7 +32,7 @@ try {
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor DarkGray
-Write-Host "  MRIT — Status dos Servidores" -ForegroundColor Cyan
+Write-Host "  MRIT - Status dos Servidores" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor DarkGray
 Write-Host ""
 
@@ -39,10 +40,10 @@ if (-not $devs) {
     Write-Host "  Nenhuma unidade encontrada." -ForegroundColor Yellow
 } else {
     foreach ($d in $devs) {
-        $siteLabel = if ($d.site_id) { $d.site_id } else { "(sem site_id)" }
-        $versao    = if ($d.versao)  { $d.versao }  else { "-" }
-        $ssid      = if ($d.wifi_ssid)   { $d.wifi_ssid }   else { "-" }
-        $speed     = if ($d.wifi_speed)  { "$($d.wifi_speed) Mbps" } else { "-" }
+        $siteLabel = if ($d.site_id)    { $d.site_id }              else { "(sem site_id)" }
+        $versao    = if ($d.versao)     { $d.versao }               else { "-" }
+        $ssid      = if ($d.wifi_ssid)  { $d.wifi_ssid }            else { "-" }
+        $speed     = if ($d.wifi_speed) { "$($d.wifi_speed) Mbps" } else { "-" }
 
         if ($d.servidor_online) {
             $last    = [DateTime]::Parse($d.servidor_online).ToUniversalTime()
@@ -55,7 +56,7 @@ if (-not $devs) {
                 $statusText  = "OFFLINE"
                 $statusColor = "Red"
                 if ($diffMin -lt 1440) { $timeStr = "ha $diffMin min" }
-                else { $timeStr = "ha $([int]($diffMin/1440))d" }
+                else { $timeStr = "ha $([int]($diffMin / 1440))d" }
             }
         } else {
             $statusText  = "NUNCA"
@@ -78,9 +79,10 @@ Write-Host "  Ultimos Comandos Admin" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor DarkGray
 Write-Host ""
 
-$cmdsUri = "$SUPABASE_URL/rest/v1/servidor_admin_commands?order=created_at.desc&limit=10"
 if ($Site) {
-    $cmdsUri = "$SUPABASE_URL/rest/v1/servidor_admin_commands?site_name=eq.$Site&order=created_at.desc&limit=5"
+    $cmdsUri = $BASE + "/servidor_admin_commands?site_name=eq." + $Site + "&order=created_at.desc&limit=5"
+} else {
+    $cmdsUri = $BASE + "/servidor_admin_commands?order=created_at.desc&limit=10"
 }
 
 try {
@@ -100,15 +102,15 @@ if (-not $cmds) {
             "executando" { "Yellow" }
             default      { "DarkGray" }
         }
-        $ts = if ($c.created_at.Length -ge 16) { $c.created_at.Substring(0,16) } else { $c.created_at }
+        $ts = if ($c.created_at.Length -ge 16) { $c.created_at.Substring(0, 16) } else { $c.created_at }
         Write-Host "  [$ts] " -NoNewline -ForegroundColor DarkGray
         Write-Host "$($c.site_name)" -NoNewline -ForegroundColor White
-        Write-Host " — $($c.comando) " -NoNewline
+        Write-Host " - $($c.comando) " -NoNewline
         Write-Host $c.status -ForegroundColor $statusColor
 
         if ($c.resultado) {
-            $preview = $c.resultado -replace "`n"," "
-            if ($preview.Length -gt 110) { $preview = $preview.Substring(0,110) + "..." }
+            $preview = $c.resultado -replace "`n", " "
+            if ($preview.Length -gt 110) { $preview = $preview.Substring(0, 110) + "..." }
             Write-Host "    $preview" -ForegroundColor DarkGray
         }
     }
