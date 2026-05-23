@@ -126,6 +126,7 @@ REMOTE_COMMAND_TABLE = "remote_commands"
 REMOTE_COMMAND_TOPIC = "realtime:remote_commands"
 REMOTE_COMMAND_HEARTBEAT_SECONDS = 20
 REMOTE_COMMAND_RECONNECT_SECONDS = 10
+REMOTE_COMMAND_MAX_AGE_SECONDS = 60  # Comandos on/off mais velhos que isso são recusados
 REMOTE_COMMAND_LISTENER_STARTED = False
 REMOTE_COMMAND_LISTENER_LOCK = threading.Lock()
 REMOTE_COMMAND_WS_LOCK = threading.Lock()
@@ -2452,6 +2453,23 @@ def process_remote_command_record(record: Dict[str, Any]) -> None:
     if not command_id:
         log("[REMOTE] Ignorando comando sem id")
         return
+
+    # Recusar comandos on/off que chegaram tarde demais (internet voltou depois de X segundos)
+    if action in ("on", "off"):
+        created_at_str = record.get("created_at")
+        if created_at_str:
+            try:
+                created_at = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
+                age = (datetime.now(timezone.utc) - created_at).total_seconds()
+                if age > REMOTE_COMMAND_MAX_AGE_SECONDS:
+                    log(f"[REMOTE] Comando {command_id} ({action}) EXPIRADO — {age:.0f}s atrás, limite {REMOTE_COMMAND_MAX_AGE_SECONDS}s")
+                    update_remote_command_status(
+                        command_id, "error",
+                        error_message=f"Comando expirado ({age:.0f}s após criação, limite {REMOTE_COMMAND_MAX_AGE_SECONDS}s)"
+                    )
+                    return
+            except Exception as e:
+                log(f"[REMOTE] Erro ao verificar expiração de {command_id}: {e}")
 
     if not claim_remote_command(command_id):
         return
