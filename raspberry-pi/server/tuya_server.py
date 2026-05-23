@@ -109,17 +109,25 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def _read_app_version() -> str:
-    """Usa o hash curto do commit git como versão. Reflete OTA automaticamente."""
+    """Lê o prefixo do arquivo VERSION e anexa o hash curto do commit git.
+    Resultado: '1.0-PI-a1b2c3d'. Reflete OTA automaticamente."""
+    prefix = "PI"
+    version_file = os.path.join(BASE_DIR, "VERSION")
+    if os.path.exists(version_file):
+        try:
+            prefix = open(version_file).read().strip()
+        except Exception:
+            pass
     try:
         r = subprocess.run(
             ["git", "-C", BASE_DIR, "rev-parse", "--short", "HEAD"],
             capture_output=True, text=True, timeout=5
         )
         if r.returncode == 0 and r.stdout.strip():
-            return r.stdout.strip()
+            return f"{prefix}-{r.stdout.strip()}"
     except Exception:
         pass
-    return "unknown"
+    return prefix
 
 
 APP_VERSION = _read_app_version()
@@ -3043,6 +3051,10 @@ def _admin_ota() -> str:
             if os.path.exists(src):
                 shutil.copy2(src, BASE_DIR)
                 copied.append(fname)
+        ver_src = os.path.join(BASE_DIR, "raspberry-pi", "VERSION")
+        if os.path.exists(ver_src):
+            shutil.copy2(ver_src, BASE_DIR)
+            copied.append("VERSION")
         tpl_s = os.path.join(src_dir, "templates")
         tpl_d = os.path.join(BASE_DIR, "templates")
         if os.path.isdir(tpl_s):

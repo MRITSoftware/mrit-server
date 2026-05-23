@@ -22,6 +22,7 @@ echo "[2/8] Copiando arquivos do servidor..."
 cp "$ROOT_DIR/server/tuya_server.py" "$INSTALL_DIR/"
 cp "$ROOT_DIR/server/web_ui.py" "$INSTALL_DIR/"
 cp -r "$ROOT_DIR/server/templates" "$INSTALL_DIR/"
+cp "$ROOT_DIR/VERSION" "$INSTALL_DIR/"
 cp "$ROOT_DIR/scripts/wifi_check.sh" "$INSTALL_DIR/scripts/"
 chmod +x "$INSTALL_DIR/scripts/wifi_check.sh"
 

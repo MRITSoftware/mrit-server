@@ -129,6 +129,9 @@ def ota_update():
                         s = os.path.join(src, f)
                         if os.path.exists(s):
                             shutil.copy2(s, BASE_DIR)
+                    ver = os.path.join(BASE_DIR, "raspberry-pi", "VERSION")
+                    if os.path.exists(ver):
+                        shutil.copy2(ver, BASE_DIR)
                     tpl_s = os.path.join(src, "templates")
                     tpl_d = os.path.join(BASE_DIR, "templates")
                     if os.path.isdir(tpl_s):
