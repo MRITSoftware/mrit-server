@@ -2623,11 +2623,11 @@ def _poll_admin_commands_once() -> None:
 
 def start_heartbeat_loop() -> None:
     """Envia heartbeat para todos os dispositivos no cache a cada 15 minutos.
+    O primeiro heartbeat dispara imediatamente ao iniciar (sem esperar 15 min).
     Também verifica comandos admin remotos no mesmo ciclo (sem thread extra)."""
     def loop():
-        log(f"[HEARTBEAT] Loop iniciado (intervalo: {HEARTBEAT_INTERVAL_SECONDS}s)")
+        log(f"[HEARTBEAT] Loop iniciado (intervalo: {HEARTBEAT_INTERVAL_SECONDS}s) — primeiro heartbeat imediato")
         while True:
-            time.sleep(HEARTBEAT_INTERVAL_SECONDS)
             try:
                 cache = load_devices_cache()
                 devices = {k: v for k, v in cache.items() if not k.startswith("_")}
@@ -2643,6 +2643,7 @@ def start_heartbeat_loop() -> None:
                 log(f"[HEARTBEAT] Erro no loop: {e}")
             # Verifica comandos admin no mesmo ciclo — sem thread extra
             _poll_admin_commands_once()
+            time.sleep(HEARTBEAT_INTERVAL_SECONDS)
     threading.Thread(target=loop, daemon=True).start()
 
 
