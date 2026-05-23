@@ -4,7 +4,7 @@
 CREATE TABLE servidor_admin_commands (
     id          BIGSERIAL PRIMARY KEY,
     site_name   TEXT NOT NULL,
-    comando     TEXT NOT NULL CHECK (comando IN ('ota_update', 'reiniciar', 'logs', 'status')),
+    comando     TEXT NOT NULL CHECK (comando IN ('ota_update', 'reiniciar', 'logs', 'status', 'tuya_discover')),
     status      TEXT NOT NULL DEFAULT 'pendente'
                     CHECK (status IN ('pendente', 'executando', 'concluido', 'erro')),
     resultado   TEXT,
@@ -39,8 +39,15 @@ CREATE POLICY "anon_update" ON servidor_admin_commands
 --   SELECT * FROM servidor_admin_commands ORDER BY created_at DESC LIMIT 10;
 --
 -- Comandos disponíveis:
---   ota_update  - git pull + copia arquivos + reinicia serviços
---   reiniciar   - reinicia mrit-server e mrit-webui
---   logs        - retorna últimas 100 linhas do log do servidor
---   status      - retorna site, version, devices, wifi_ssid, timestamp
+--   ota_update    - git pull + copia arquivos + reinicia serviços
+--   reiniciar     - reinicia mrit-server e mrit-webui
+--   logs          - retorna últimas 100 linhas do log do servidor
+--   status        - retorna site, version, devices, wifi_ssid, timestamp
+--   tuya_discover - escaneia rede, busca local_key, sincroniza dispositivo
+--
+-- Se a tabela já existir, adicionar tuya_discover ao constraint:
+--   ALTER TABLE servidor_admin_commands
+--     DROP CONSTRAINT servidor_admin_commands_comando_check,
+--     ADD CONSTRAINT servidor_admin_commands_comando_check
+--       CHECK (comando IN ('ota_update', 'reiniciar', 'logs', 'status', 'tuya_discover'));
 -- ============================================================

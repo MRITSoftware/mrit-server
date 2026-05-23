@@ -2634,6 +2634,123 @@ def _poll_admin_commands_once() -> None:
         log(f"[ADMIN] Erro no poll: {e}")
 
 
+def _auto_discover_and_sync() -> str:
+    """Descobre dispositivos Tuya na rede e sincroniza com Supabase + cache local.
+    Chamado automaticamente no boot se o cache estiver vazio, e via comando admin tuya_discover."""
+    log("[AUTO_DISCOVER] Iniciando descoberta automatica de dispositivos...")
+
+    if SITE_NAME in ("RASPBERRY_PI", "SITE_DESCONHECIDO", ""):
+        log("[AUTO_DISCOVER] AVISO: site_name nao configurado — usando valor padrao")
+
+    lan_devices = scan_devices()
+    if not lan_devices:
+        log("[AUTO_DISCOVER] Nenhum dispositivo Tuya encontrado na rede")
+        return "Nenhum dispositivo encontrado na rede"
+
+    log(f"[AUTO_DISCOVER] {len(lan_devices)} dispositivo(s) encontrado(s) na rede")
+    synced = 0
+
+    for tuya_id, lan_info in lan_devices.items():
+        lan_ip = lan_info.get("ip")
+        protocol_version = lan_info.get("version")
+        if protocol_version:
+            protocol_version = str(protocol_version)
+
+        # 1. Tuya Cloud API (mais confiavel)
+        local_key = fetch_local_key_from_tuya_api(tuya_id)
+
+        # 2. Fallback: Supabase (pode ter sido cadastrado pelo app Android)
+        if not local_key:
+            db_devs = get_devices_from_db([tuya_id])
+            if tuya_id in db_devs:
+                local_key = db_devs[tuya_id].get("local_key")
+                if local_key:
+                    log(f"[AUTO_DISCOVER] local_key obtida do banco para {tuya_id}")
+
+        # 3. Fallback: cache local (de descoberta anterior)
+        if not local_key:
+            cached = get_device_from_cache(tuya_id)
+            if cached:
+                local_key = cached.get("local_key")
+                if local_key:
+                    log(f"[AUTO_DISCOVER] local_key obtida do cache local para {tuya_id}")
+
+        # Salvar no cache local (funciona offline nas proximas reinicializacoes)
+        save_device_to_cache(
+            tuya_device_id=tuya_id,
+            local_key=local_key,
+            lan_ip=lan_ip,
+            version=normalize_version(protocol_version),
+            device_name=SITE_NAME
+        )
+        set_last_active_device(tuya_id)
+
+        # Sincronizar com Supabase se houver internet
+        if has_internet_connection():
+            try:
+                db_devs = get_devices_from_db([tuya_id])
+                if tuya_id in db_devs:
+                    update_device_in_db(
+                        tuya_device_id=tuya_id,
+                        site_id=SITE_NAME,
+                        name=SITE_NAME,
+                        local_key=local_key,
+                        lan_ip=lan_ip,
+                        protocol_version=protocol_version
+                    )
+                else:
+                    create_device_in_db(
+                        tuya_device_id=tuya_id,
+                        site_id=SITE_NAME,
+                        name=SITE_NAME,
+                        local_key=local_key,
+                        lan_ip=lan_ip,
+                        protocol_version=protocol_version
+                    )
+            except Exception as e:
+                log(f"[AUTO_DISCOVER] Erro ao sincronizar {tuya_id} com Supabase: {e}")
+        else:
+            log(f"[AUTO_DISCOVER] Sem internet — device {tuya_id} salvo so no cache local")
+
+        synced += 1
+        key_ok = "com local_key" if local_key else "SEM local_key (verificar credenciais Tuya)"
+        log(f"[AUTO_DISCOVER] {tuya_id} @ {lan_ip} — {key_ok}")
+
+    return f"{synced} dispositivo(s) descoberto(s) e sincronizado(s)"
+
+
+def start_auto_discover_loop() -> None:
+    """Roda descoberta automatica no boot se o cache estiver vazio.
+    Tenta novamente a cada 5 min ate encontrar pelo menos um dispositivo."""
+    def loop():
+        retries = 0
+        while True:
+            cache = load_devices_cache()
+            devices = [k for k in cache.keys() if not k.startswith("_")]
+            if devices:
+                log(f"[AUTO_DISCOVER] Cache ja tem {len(devices)} dispositivo(s) — descoberta encerrada")
+                return
+            if retries == 0:
+                log("[AUTO_DISCOVER] Cache vazio — iniciando descoberta automatica no boot...")
+            else:
+                log(f"[AUTO_DISCOVER] Tentativa {retries + 1} — ainda sem dispositivos no cache")
+            try:
+                result = _auto_discover_and_sync()
+                log(f"[AUTO_DISCOVER] Resultado: {result}")
+            except Exception as e:
+                log(f"[AUTO_DISCOVER] Erro na descoberta: {e}")
+            # Verificar se encontrou algo
+            cache = load_devices_cache()
+            devices = [k for k in cache.keys() if not k.startswith("_")]
+            if devices:
+                log(f"[AUTO_DISCOVER] Sucesso: {len(devices)} dispositivo(s) adicionado(s) ao cache")
+                return
+            retries += 1
+            log("[AUTO_DISCOVER] Nenhum dispositivo encontrado, nova tentativa em 5 min...")
+            time.sleep(300)
+    threading.Thread(target=loop, daemon=True).start()
+
+
 def start_heartbeat_loop() -> None:
     """Envia heartbeat para todos os dispositivos no cache a cada 15 minutos.
     O primeiro heartbeat dispara imediatamente ao iniciar (sem esperar 15 min).
@@ -3150,6 +3267,8 @@ def _process_admin_command(cmd: Dict[str, Any]) -> None:
             resultado = _admin_logs()
         elif comando == "status":
             resultado = _admin_status()
+        elif comando == "tuya_discover":
+            resultado = _auto_discover_and_sync()
         else:
             resultado = f"Comando desconhecido: {comando}"
 
@@ -3173,6 +3292,8 @@ def start_server(host="0.0.0.0", port=8000):
     log(f"[START] Servidor Tuya local rodando em http://{host}:{port} (SITE={SITE_NAME})")
     # Faz o scan inicial
     scan_and_print_devices()
+    # Descoberta automatica se cache vazio (plug-and-play para novo cliente)
+    start_auto_discover_loop()
     # Iniciar refresh periódico
     start_device_refresh_loop()
     # Heartbeat a cada 15 minutos

@@ -1,10 +1,15 @@
-# deploy-ota.ps1 — Envia comando OTA para uma ou todas as unidades MRIT
+# deploy-ota.ps1 — Envia comando admin para uma ou todas as unidades MRIT
 # Uso:
-#   .\deploy-ota.ps1                              # todas as unidades
-#   .\deploy-ota.ps1 -Site "itaquera@gelafit.com.br"   # unidade especifica
+#   .\deploy-ota.ps1                                          # OTA para todas as unidades
+#   .\deploy-ota.ps1 -Site "itaquera@gelafit.com.br"          # OTA para unidade especifica
+#   .\deploy-ota.ps1 -Comando tuya_discover                   # Redescoberta de dispositivo
+#   .\deploy-ota.ps1 -Comando reiniciar -Site "x@gelafit.com" # Reiniciar unidade especifica
+#
+# Comandos disponiveis: ota_update | tuya_discover | reiniciar | logs | status
 
 param(
-    [string]$Site = ""
+    [string]$Site    = "",
+    [string]$Comando = "ota_update"
 )
 
 $SUPABASE_URL = "https://kihyhoqbrkwbfudttevo.supabase.co"
@@ -20,6 +25,8 @@ $postHeaders = $authHeaders + @{
 }
 
 # -- Resolve lista de alvos --------------------------------------------------
+Write-Host "Comando: $Comando" -ForegroundColor Cyan
+
 if ($Site) {
     $targets = @($Site)
     Write-Host "Alvo: $Site" -ForegroundColor Cyan
@@ -50,7 +57,7 @@ Write-Host ""
 $ok = 0
 foreach ($t in $targets) {
     try {
-        $body = @{ site_name = $t; comando = "ota_update" } | ConvertTo-Json -Compress
+        $body = @{ site_name = $t; comando = $Comando } | ConvertTo-Json -Compress
         Invoke-RestMethod `
             -Uri ($SUPABASE_URL + "/rest/v1/servidor_admin_commands") `
             -Method POST -Headers $postHeaders -Body $body | Out-Null
@@ -63,5 +70,5 @@ foreach ($t in $targets) {
 
 Write-Host ""
 Write-Host "$ok/$($targets.Count) unidade(s) notificadas." -ForegroundColor Cyan
-Write-Host "A atualizacao ocorre no proximo heartbeat (ate 15 min)."
+Write-Host "Comando '$Comando' sera executado no proximo heartbeat (ate 15 min)."
 Write-Host "Para acompanhar: .\check-servers.ps1"
