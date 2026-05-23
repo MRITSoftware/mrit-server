@@ -2681,7 +2681,8 @@ def api_tuya_heartbeat():
         tuya_device_id = data.get("tuya_device_id")
         battery_level = data.get("battery_level")  # opcional
         internet_speed_mbps = data.get("internet_speed_mbps")  # opcional
-        
+        wifi_ssid = data.get("wifi_ssid") or get_wifi_ssid()  # detecta automaticamente se não fornecido
+
         if not tuya_device_id:
             return jsonify({
                 "ok": False,
@@ -2699,7 +2700,7 @@ def api_tuya_heartbeat():
             log(f"[HEARTBEAT] Métricas recebidas: {', '.join(metrics_log)}")
         
         # Atualizar heartbeat no banco (com métricas opcionais)
-        success = update_device_heartbeat(tuya_device_id, battery_level, internet_speed_mbps)
+        success = update_device_heartbeat(tuya_device_id, battery_level, internet_speed_mbps, wifi_ssid)
         
         if success:
             response_msg = f"Heartbeat atualizado com sucesso para device {tuya_device_id}"
