@@ -6,12 +6,29 @@ import traceback
 import threading
 import time
 import socket
+import subprocess
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone
 from urllib.parse import urlencode, urlparse
 
 from flask import Flask, request, jsonify
 import tinytuya
+
+
+def get_wifi_ssid() -> Optional[str]:
+    """Retorna o SSID da rede WiFi atual via nmcli."""
+    try:
+        result = subprocess.run(
+            ["nmcli", "-t", "-f", "ACTIVE,SSID", "device", "wifi", "list"],
+            capture_output=True, text=True, timeout=5
+        )
+        for line in result.stdout.strip().split("\n"):
+            parts = line.split(":")
+            if len(parts) >= 2 and parts[0] == "yes" and parts[1]:
+                return parts[1]
+    except Exception:
+        pass
+    return None
 
 # =========================
 # LOGGING (definido primeiro)
@@ -867,12 +884,13 @@ def tuya_command_with_timeout(device: Any, action: str, timeout_seconds: int = 2
 def update_device_heartbeat(
     tuya_device_id: str,
     battery_level: Optional[int] = None,
-    internet_speed_mbps: Optional[float] = None
+    internet_speed_mbps: Optional[float] = None,
+    wifi_ssid: Optional[str] = None
 ) -> bool:
     """
     Atualiza o campo servidor_online de um device (heartbeat/ping).
     Primeiro tenta fazer ping na placa física, depois atualiza o banco.
-    Aceita métricas opcionais: battery_level (0-100) e internet_speed_mbps.
+    Aceita métricas opcionais: battery_level (0-100), internet_speed_mbps e wifi_ssid.
     A velocidade da internet é salva no campo wifi_speed (integer) do banco.
     """
     if not REQUESTS_AVAILABLE:
@@ -1005,12 +1023,17 @@ def update_device_heartbeat(
             else:
                 log(f"[HEARTBEAT] Velocidade da internet inválida (negativa): {internet_speed_mbps}")
         
+        if wifi_ssid:
+            update_data["wifi_ssid"] = wifi_ssid
+
         metrics_info = []
         if battery_level is not None and 0 <= battery_level <= 100:
             metrics_info.append(f"bateria={battery_level}%")
         if internet_speed_mbps is not None and internet_speed_mbps >= 0:
             wifi_speed_int = int(round(internet_speed_mbps))
             metrics_info.append(f"velocidade={wifi_speed_int} Mbps")
+        if wifi_ssid:
+            metrics_info.append(f"ssid={wifi_ssid}")
         
         metrics_str = f", {', '.join(metrics_info)}" if metrics_info else ""
         
@@ -2571,10 +2594,11 @@ def start_heartbeat_loop() -> None:
                 if not devices:
                     log("[HEARTBEAT] Nenhum dispositivo no cache")
                     continue
+                ssid = get_wifi_ssid()
                 for device_id in devices:
-                    success = update_device_heartbeat(device_id)
+                    success = update_device_heartbeat(device_id, wifi_ssid=ssid)
                     status = "OK" if success else "FALHA"
-                    log(f"[HEARTBEAT] {status} {device_id}")
+                    log(f"[HEARTBEAT] {status} {device_id}" + (f" (ssid={ssid})" if ssid else ""))
             except Exception as e:
                 log(f"[HEARTBEAT] Erro no loop: {e}")
     threading.Thread(target=loop, daemon=True).start()
