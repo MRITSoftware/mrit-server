@@ -4,7 +4,7 @@ After=NetworkManager.service
 
 [Timer]
 OnBootSec=30sec
-OnUnitActiveSec=5min
+OnUnitActiveSec=30sec
 Unit=mrit-wifi-check.service
 
 [Install]
